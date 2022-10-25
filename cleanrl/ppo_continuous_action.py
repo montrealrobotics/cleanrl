@@ -5,8 +5,9 @@ import random
 import time
 from distutils.util import strtobool
 
-import gym
 import numpy as np
+import gym
+import robo_gym
 import pybullet_envs  # noqa
 import torch
 import torch.nn as nn
@@ -70,6 +71,8 @@ def parse_args():
         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target-kl", type=float, default=None,
         help="the target KL divergence threshold")
+    parser.add_argument("--target-ip", type=str, default='',
+        help="the ip of the robot server")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -77,9 +80,12 @@ def parse_args():
     return args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name, gamma):
+def make_env(env_id, seed, idx, capture_video, run_name, gamma, target_ip):
     def thunk():
-        env = gym.make(env_id)
+        if target_ip:
+            env = gym.make(env_id, ip=target_ip, gui=True)
+        else:
+            env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
             if idx == 0:
@@ -166,7 +172,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)]
+        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, args.gamma, args.target_ip) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
