@@ -73,6 +73,8 @@ def parse_args():
         help="the target KL divergence threshold")
     parser.add_argument("--target-ip", type=str, default='',
         help="the ip of the robot server")
+	parser.add_argument("--rs-address", type=str, default='',
+        help="the ip:port of the robot server")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -80,9 +82,11 @@ def parse_args():
     return args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name, gamma, target_ip):
+def make_env(env_id, seed, idx, capture_video, run_name, gamma, target_ip, rs_address):
     def thunk():
-        if target_ip:
+        if rs_address:
+			env = gym.make(env_id, rs_address=rs_address)
+		elif target_ip:
             env = gym.make(env_id, ip=target_ip, gui=True)
         else:
             env = gym.make(env_id)
@@ -172,7 +176,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, args.gamma, args.target_ip) for i in range(args.num_envs)]
+        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, args.gamma, args.target_ip, args.rs_address) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
