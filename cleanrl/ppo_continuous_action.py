@@ -87,9 +87,9 @@ def make_env(env_id, seed, idx, capture_video, run_name, gamma, target_ip):
         else:
             env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        if capture_video:
-            if idx == 0:
-                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        # if capture_video:
+        #    if idx == 0:
+        env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         env = gym.wrappers.ClipAction(env)
         env = gym.wrappers.NormalizeObservation(env)
         env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
@@ -156,11 +156,11 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
+    # writer = SummaryWriter(f"runs/{run_name}")
+    # writer.add_text(
+    #     "hyperparameters",
+    #     "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+    # )
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -221,8 +221,11 @@ if __name__ == "__main__":
             for item in info:
                 if "episode" in item.keys():
                     print(f"global_step={global_step}, episodic_return={item['episode']['r']}")
-                    writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
-                    writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
+                    wandb.log({"charts/episodic_return": item["episode"]["r"]}, step=global_step)
+                    wandb.log({"charts/episodic_length": item["episode"]["l"]}, step=global_step)
+                    torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "agent.pt"))
+                    wandb.save(os.path.join(wandb.run.dir, "agent.pt"))
+                    #agent.save(os.path.join(wandb.run.dir, "agent.h5"))
                     break
 
         # bootstrap value if not done
@@ -309,16 +312,16 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
-        writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-        writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-        writer.add_scalar("losses/explained_variance", explained_var, global_step)
+        wandb.log({"charts/learning_rate": optimizer.param_groups[0]["lr"]}, step=global_step)
+        wandb.log({"losses/value_loss": v_loss.item()}, step=global_step)
+        wandb.log({"losses/policy_loss": pg_loss.item()}, step=global_step)
+        wandb.log({"losses/entropy": entropy_loss.item()}, step=global_step)
+        wandb.log({"losses/old_approx_kl": old_approx_kl.item()}, step=global_step)
+        wandb.log({"losses/approx_kl": approx_kl.item()}, step=global_step)
+        wandb.log({"losses/clipfrac": np.mean(clipfracs)}, step=global_step)
+        wandb.log({"losses/explained_variance": explained_var}, step=global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        wandb.log({"charts/SPS": int(global_step / (time.time() - start_time))}, step=global_step)
 
     envs.close()
     writer.close()
