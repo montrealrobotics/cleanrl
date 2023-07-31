@@ -73,7 +73,7 @@ def parse_args():
         help="the target KL divergence threshold")
     parser.add_argument("--target-ip", type=str, default='',
         help="the ip of the robot server")
-	parser.add_argument("--rs-address", type=str, default='',
+    parser.add_argument("--rs-address", type=str, default='',
         help="the ip:port of the robot server")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -85,8 +85,8 @@ def parse_args():
 def make_env(env_id, seed, idx, capture_video, run_name, gamma, target_ip, rs_address):
     def thunk():
         if rs_address:
-			env = gym.make(env_id, rs_address=rs_address)
-		elif target_ip:
+            env = gym.make(env_id, rs_address=rs_address)
+        elif target_ip:
             env = gym.make(env_id, ip=target_ip, gui=True)
         else:
             env = gym.make(env_id)
