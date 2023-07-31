@@ -4,11 +4,8 @@ import os
 import random
 import time
 from distutils.util import strtobool
-
+import gymnasium as gym
 import numpy as np
-import gym
-import robo_gym
-import pybullet_envs  # noqa
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -37,7 +34,7 @@ def parse_args():
         help="whether to capture videos of the agent performances (check out `videos` folder)")
 
     # Algorithm specific arguments
-    parser.add_argument("--env-id", type=str, default="HalfCheetahBulletEnv-v0",
+    parser.add_argument("--env-id", type=str, default="HalfCheetah-v4",
         help="the id of the environment")
     parser.add_argument("--total-timesteps", type=int, default=1000000,
         help="total timesteps of the experiments")
@@ -73,8 +70,10 @@ def parse_args():
         help="the target KL divergence threshold")
     parser.add_argument("--target-ip", type=str, default='',
         help="the ip of the robot server")
+    parser.add_argument("--robot-type", type=str, default='ur',
+            help="robot manufacturer")
     parser.add_argument("--rs-address", type=str, default='',
-        help="the ip:port of the robot server")
+                        help = "the ip:port of the robot server")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -82,14 +81,24 @@ def parse_args():
     return args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name, gamma, target_ip, rs_address):
+def make_env(env_id, robot_type, idx, capture_video, run_name, gamma, target_ip, rs_address):
     def thunk():
-        if rs_address:
-            env = gym.make(env_id, rs_address=rs_address)
-        elif target_ip:
-            env = gym.make(env_id, ip=target_ip, gui=True)
-        else:
-            env = gym.make(env_id)
+        if robot_type == "ur":
+            if rs_address:
+                env = gym.make(env_id, ur_model='ur5', rs_address=rs_address)
+            elif target_ip:
+                env = gym.make(env_id, ur_model='ur5', ip=ip, gui=True)
+            else:
+                env = gym.make(env_id)
+        elif robot_type == "interbotix":
+            if rs_address:
+                env = gym.make(env_id, rs_address=rs_address, robot_model='rx150')
+            elif target_ip:
+                env = gym.make(env_id, robot_model='rx150', ip=target_ip, gui=True)
+            else:
+                env = gym.make(env_id)
+
+        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         # if capture_video:
         #    if idx == 0:
@@ -99,9 +108,6 @@ def make_env(env_id, seed, idx, capture_video, run_name, gamma, target_ip, rs_ad
         env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
-        env.seed(seed)
-        env.action_space.seed(seed)
-        env.observation_space.seed(seed)
         return env
 
     return thunk
@@ -176,7 +182,8 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, args.gamma, args.target_ip, args.rs_address) for i in range(args.num_envs)]
+        [make_env(args.env_id, args.robot_type, i, args.capture_video, run_name, args.gamma, args.target_ip,
+                  args.rs_address) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -194,7 +201,8 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs = torch.Tensor(envs.reset()).to(device)
+    next_obs, _ = envs.reset(seed=args.seed)
+    next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // args.batch_size
 
@@ -218,19 +226,24 @@ if __name__ == "__main__":
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, reward, done, info = envs.step(action.cpu().numpy())
+            next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
+            done = np.logical_or(terminated, truncated)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
 
-            for item in info:
-                if "episode" in item.keys():
-                    print(f"global_step={global_step}, episodic_return={item['episode']['r']}")
-                    wandb.log({"charts/episodic_return": item["episode"]["r"]}, step=global_step)
-                    wandb.log({"charts/episodic_length": item["episode"]["l"]}, step=global_step)
-                    torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "agent.pt"))
+            # Only print when at least 1 env is done
+            if "final_info" not in infos:
+                continue
+
+            for info in infos["final_info"]:
+                # Skip the envs that are not done
+                if info is None:
+                    continue
+                print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                if args.track:
+                    wandb.log({"charts/episodic_return": info["episode"]["r"]}, step=global_step)
+                    wandb.log({"charts/episodic_length": info["episode"]["l"]}, step=global_step)
                     wandb.save(os.path.join(wandb.run.dir, "agent.pt"))
-                    #agent.save(os.path.join(wandb.run.dir, "agent.h5"))
-                    break
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -316,16 +329,18 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        wandb.log({"charts/learning_rate": optimizer.param_groups[0]["lr"]}, step=global_step)
-        wandb.log({"losses/value_loss": v_loss.item()}, step=global_step)
-        wandb.log({"losses/policy_loss": pg_loss.item()}, step=global_step)
-        wandb.log({"losses/entropy": entropy_loss.item()}, step=global_step)
-        wandb.log({"losses/old_approx_kl": old_approx_kl.item()}, step=global_step)
-        wandb.log({"losses/approx_kl": approx_kl.item()}, step=global_step)
-        wandb.log({"losses/clipfrac": np.mean(clipfracs)}, step=global_step)
-        wandb.log({"losses/explained_variance": explained_var}, step=global_step)
+        if args.track:
+            wandb.log({"charts/learning_rate": optimizer.param_groups[0]["lr"]}, step=global_step)
+            wandb.log({"losses/value_loss": v_loss.item()}, step=global_step)
+            wandb.log({"losses/policy_loss": pg_loss.item()}, step=global_step)
+            wandb.log({"losses/entropy": entropy_loss.item()}, step=global_step)
+            wandb.log({"losses/old_approx_kl": old_approx_kl.item()}, step=global_step)
+            wandb.log({"losses/approx_kl": approx_kl.item()}, step=global_step)
+            wandb.log({"losses/clipfrac": np.mean(clipfracs)}, step=global_step)
+            wandb.log({"losses/explained_variance": explained_var}, step=global_step)
+            wandb.log({"charts/SPS": int(global_step / (time.time() - start_time))}, step=global_step)
+
         print("SPS:", int(global_step / (time.time() - start_time)))
-        wandb.log({"charts/SPS": int(global_step / (time.time() - start_time))}, step=global_step)
+
 
     envs.close()
-    writer.close()
