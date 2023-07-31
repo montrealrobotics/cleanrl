@@ -87,7 +87,7 @@ def make_env(env_id, robot_type, idx, capture_video, run_name, gamma, target_ip,
             if rs_address:
                 env = gym.make(env_id, ur_model='ur5', rs_address=rs_address)
             elif target_ip:
-                env = gym.make(env_id, ur_model='ur5', ip=ip, gui=True)
+                env = gym.make(env_id, ur_model='ur5', ip=target_ip, gui=True)
             else:
                 env = gym.make(env_id)
         elif robot_type == "interbotix":
@@ -97,6 +97,8 @@ def make_env(env_id, robot_type, idx, capture_video, run_name, gamma, target_ip,
                 env = gym.make(env_id, robot_model='rx150', ip=target_ip, gui=True)
             else:
                 env = gym.make(env_id)
+        else:
+            env = gym.make(env_id)
 
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -341,6 +343,5 @@ if __name__ == "__main__":
             wandb.log({"charts/SPS": int(global_step / (time.time() - start_time))}, step=global_step)
 
         print("SPS:", int(global_step / (time.time() - start_time)))
-
 
     envs.close()
