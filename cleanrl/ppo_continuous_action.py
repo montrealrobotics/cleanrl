@@ -16,15 +16,17 @@ from torch.utils.tensorboard import SummaryWriter
 
 from comet_ml import Experiment
 
+from src.models.risk_models import *
+
 import hydra
 import os
 
-def make_env(env_id, idx, capture_video, run_name, gamma):
+def make_env(cfg, idx, capture_video, run_name, gamma):
     def thunk():
         if capture_video:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.make(cfg.env.env_id, render_mode="rgb_array", early_termination=cfg.env.early_termination, term_cost=cfg.env.term_cost)
         else:
-            env = gym.make(env_id)
+            env = gym.make(cfg.env.env_id, early_termination=cfg.env.early_termination, term_cost=cfg.env.term_cost)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
@@ -44,6 +46,53 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
+
+
+
+class RiskAgent(nn.Module):
+    def __init__(self, envs, risk_actor=True, risk_critic=False):
+        super().__init__()
+        ## Actor
+        self.actor_fc1 = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64))
+        self.actor_fc2 = layer_init(nn.Linear(76, 76))
+        self.actor_fc3 = layer_init(nn.Linear(76, np.prod(envs.single_action_space.shape)), std=0.01)
+        ## Critic
+        self.critic_fc1 = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64))
+        self.critic_fc2 = layer_init(nn.Linear(76, 76))
+        self.critic_fc3 = layer_init(nn.Linear(76, 1), std=0.01)
+
+        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+        self.tanh = nn.Tanh()
+
+        self.risk_encoder = nn.Sequential(
+            layer_init(nn.Linear(2, 12)),
+            nn.Tanh())
+
+    def forward_actor(self, x, risk):
+        risk = self.risk_encoder(risk)
+        x = self.tanh(self.actor_fc1(x))
+        x = self.tanh(self.actor_fc2(torch.cat([x, risk], axis=1)))
+        x = self.tanh(self.actor_fc3(x))
+
+        return x
+
+
+    def get_value(self, x, risk):
+        risk = self.risk_encoder(risk)
+        x = self.tanh(self.critic_fc1(x))
+        x = self.tanh(self.critic_fc2(torch.cat([x, risk], axis=1)))
+        value = self.tanh(self.critic_fc3(x))
+
+        return value
+
+    def get_action_and_value(self, x, risk, action=None):
+        action_mean = self.forward_actor(x, risk)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x, risk)
 
 
 class Agent(nn.Module):
@@ -91,6 +140,7 @@ def train(cfg):
         workspace="hbutsuak95",
     )
 
+    experiment.add_tag(cfg.tag)
 
     # TRY NOT TO MODIFY: seeding
     random.seed(cfg.ppo.seed)
@@ -102,13 +152,31 @@ def train(cfg):
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(cfg.env_id, i, cfg.ppo.capture_video, run_name, cfg.ppo.gamma) for i in range(cfg.ppo.num_envs)]
+        [make_env(cfg, i, cfg.ppo.capture_video, run_name, cfg.ppo.gamma) for i in range(cfg.ppo.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    agent = Agent(envs).to(device)
+    if cfg.risk.model_type == "bayesian":
+        risk_model_class = BayesRiskEst 
+    else:
+        risk_model_class = RiskEst
+    print(envs.single_observation_space.shape)
+
+    if cfg.risk.use_risk:
+        agent = RiskAgent(envs=envs).to(device)
+        if os.path.exists(cfg.risk.risk_model_path):
+            risk_model = risk_model_class(obs_size=np.array(envs.single_observation_space.shape).prod())
+            #risk_model.load_state_dict(torch.load(cfg.risk.risk_model_path, map_location=device))
+            risk_model.to(device)
+            risk_model.eval()
+        else:
+            raise("No model in the path specified!!")
+    else:
+        agent = Agent(envs=envs).to(device)
+
     optimizer = optim.Adam(agent.parameters(), lr=cfg.ppo.learning_rate, eps=1e-5)
 
+    print(envs.single_observation_space.shape)
     # ALGO Logic: Storage setup
     obs = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs) + envs.single_action_space.shape).to(device)
@@ -116,6 +184,12 @@ def train(cfg):
     rewards = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs)).to(device)
     dones = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs)).to(device)
     values = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs)).to(device)
+    costs = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs)).to(device)
+    risks = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs) + (2,)).to(device)
+
+    all_costs = torch.zeros((cfg.ppo.total_timesteps, cfg.ppo.num_envs)).to(device)
+    all_risks = torch.zeros((cfg.ppo.total_timesteps, cfg.ppo.num_envs)).to(device)
+
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -124,8 +198,10 @@ def train(cfg):
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(cfg.ppo.num_envs).to(device)
     num_updates = cfg.ppo.total_timesteps // batch_size
-    cum_cost, ep_cost = np.array([0.]), np.array([0.])
 
+    cum_cost, ep_cost, ep_risk_cost_int, cum_risk_cost_int, ep_risk, cum_risk = 0, 0, 0, 0, 0, 0
+    cost = 0
+    last_step = 0
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if cfg.ppo.anneal_lr:
@@ -137,10 +213,27 @@ def train(cfg):
             global_step += 1 * cfg.ppo.num_envs
             obs[step] = next_obs
             dones[step] = next_done
+            costs[step] = cost
+            all_costs[global_step] = cost
+
+            if cfg.risk.use_risk:
+                next_risk = risk_model(next_obs / 10.0).detach()
+                if cfg.risk.binary_risk:
+                    id_risk = torch.argmax(next_risk, axis=1)
+                    next_risk = torch.zeros_like(next_risk)
+                    next_risk[:, id_risk] = 1
+
+                risks[step] = next_risk
+                all_risks[global_step] = torch.argmax(next_risk, axis=-1)
+
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                if cfg.risk.use_risk:
+                    action, logprob, _, value = agent.get_action_and_value(next_obs, next_risk)
+                else:
+                    action, logprob, _, value = agent.get_action_and_value(next_obs)
+
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -166,16 +259,41 @@ def train(cfg):
                 # Skip the envs that are not done
                 if info is None:
                     continue
+
+                ep_cost = torch.sum(all_costs[last_step:global_step]).item()
+                cum_cost += ep_cost
+
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
+
+                if cfg.risk.use_risk:
+                    ep_risk = torch.sum(all_risks[last_step:global_step]).item()
+                    cum_risk += ep_risk
+
+                    risk_cost_int = torch.logical_and(all_costs[last_step:global_step], all_risks[last_step:global_step])
+                    ep_risk_cost_int = torch.sum(risk_cost_int).item()
+                    cum_risk_cost_int += ep_risk_cost_int
+
+
+                    experiment.log_metric("charts/episodic_risk", ep_risk, global_step)
+                    experiment.log_metric("charts/cummulative_risk", cum_risk, global_step)
+                    experiment.log_metric("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
+                    experiment.log_metric("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
+
+                    print(f"global_step={global_step}, ep_Risk_cost_int={ep_risk_cost_int}, cum_Risk_cost_int={cum_risk_cost_int}")
+                    print(f"global_step={global_step}, episodic_risk={ep_risk}, cum_risks={cum_risk}, cum_costs={cum_cost}")
+
                 experiment.log_metric("charts/episodic_return", info["episode"]["r"], global_step)
                 experiment.log_metric("charts/episodic_length", info["episode"]["l"], global_step)
-                experiment.log_metric("charts/episodic_cost", ep_cost[0], global_step)
-                experiment.log_metric("charts/cummulative_cost", cum_cost[0], global_step)
-                ep_cost = np.array([0.])
+                experiment.log_metric("charts/episodic_cost", ep_cost, global_step)
+                experiment.log_metric("charts/cummulative_cost", cum_cost, global_step)
+                last_step = global_step
 
         # bootstrap value if not done
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
+            if cfg.risk.use_risk:
+                next_value = agent.get_value(next_obs, next_risk).reshape(1, -1)
+            else:
+                next_value = agent.get_value(next_obs).reshape(1, -1)   
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(cfg.ppo.num_steps)):
@@ -196,6 +314,7 @@ def train(cfg):
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
+        b_risks = risks.reshape((-1, ) + (2, ))
 
         # Optimizing the policy and value network
         b_inds = np.arange(batch_size)
@@ -206,7 +325,11 @@ def train(cfg):
                 end = start + minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                if cfg.risk.use_risk:
+                    _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_risks[mb_inds], b_actions[mb_inds])
+                else:
+                    _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -269,9 +392,15 @@ def train(cfg):
         experiment.log_metric("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
     envs.close()
-    writer.close()
     return 1 
 
-if __name__ == "__main__":
-    train()
+import yaml
 
+from hydra import compose, initialize
+from omegaconf import OmegaConf
+
+
+if __name__ == "__main__":
+    initialize(config_path="../../../conf", job_name="test_app")
+    cfg = compose(config_name="config")
+    train(cfg)
