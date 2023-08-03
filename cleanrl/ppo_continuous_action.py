@@ -204,7 +204,7 @@ def train(cfg):
     cost = 0
     last_step = 0
     episode = 0
-
+    step_log = 0
     if cfg.ppo.collect_data:
         storage_path = os.path.join(cfg.ppo.storage_path, experiment.name)
         make_dirs(storage_path, episode)
@@ -252,8 +252,8 @@ def train(cfg):
 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'prev_action': action} 
             if cfg.ppo.collect_data:
-                store_data(next_obs, info_dict, storage_path, episode)
-
+                store_data(next_obs, info_dict, storage_path, episode, step_log)
+            step_log+=1 
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
 
             if not done:
