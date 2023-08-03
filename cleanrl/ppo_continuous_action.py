@@ -17,6 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from comet_ml import Experiment
 
 from src.models.risk_models import *
+from src.utils import * 
 
 import hydra
 import os
@@ -202,6 +203,12 @@ def train(cfg):
     cum_cost, ep_cost, ep_risk_cost_int, cum_risk_cost_int, ep_risk, cum_risk = 0, 0, 0, 0, 0, 0
     cost = 0
     last_step = 0
+    episode = 0
+
+    if cfg.ppo.collect_data:
+        storage_path = os.path.join(cfg.ppo.storage_path, experiment.name)
+        make_dirs(storage_path, episode)
+
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if cfg.ppo.anneal_lr:
@@ -237,11 +244,16 @@ def train(cfg):
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
-
+            
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
+
+            info_dict = {'reward': reward, 'done': done, 'cost': cost, 'prev_action': action} 
+            if cfg.ppo.collect_data:
+                store_data(next_obs, info_dict, storage_path, episode)
+
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
 
             if not done:
@@ -287,6 +299,9 @@ def train(cfg):
                 experiment.log_metric("charts/episodic_cost", ep_cost, global_step)
                 experiment.log_metric("charts/cummulative_cost", cum_cost, global_step)
                 last_step = global_step
+                episode += 1
+                if cfg.ppo.collect_data:
+                    make_dirs(storage_path, episode)
 
         # bootstrap value if not done
         with torch.no_grad():
