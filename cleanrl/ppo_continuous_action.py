@@ -142,7 +142,9 @@ def train(cfg):
     )
 
     experiment.add_tag(cfg.tag)
-
+    experiment.log_parameters(cfg.ppo)
+    experiment.log_parameters(cfg.risk)
+    experiment.log_parameters(cfg.env)
     # TRY NOT TO MODIFY: seeding
     random.seed(cfg.ppo.seed)
     np.random.seed(cfg.ppo.seed)
@@ -167,7 +169,7 @@ def train(cfg):
         agent = RiskAgent(envs=envs).to(device)
         if os.path.exists(cfg.risk.risk_model_path):
             risk_model = risk_model_class(obs_size=np.array(envs.single_observation_space.shape).prod())
-            #risk_model.load_state_dict(torch.load(cfg.risk.risk_model_path, map_location=device))
+            risk_model.load_state_dict(torch.load(cfg.risk.risk_model_path, map_location=device))
             risk_model.to(device)
             risk_model.eval()
         else:
@@ -300,6 +302,7 @@ def train(cfg):
                 experiment.log_metric("charts/cummulative_cost", cum_cost, global_step)
                 last_step = global_step
                 episode += 1
+                step_log = 0
                 if cfg.ppo.collect_data:
                     make_dirs(storage_path, episode)
 
