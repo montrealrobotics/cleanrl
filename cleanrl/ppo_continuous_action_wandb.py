@@ -546,13 +546,8 @@ def train(cfg):
     writer.close()
     return 1 
 
-import yaml
-
-from hydra import compose, initialize
-from omegaconf import OmegaConf
 
 
 if __name__ == "__main__":
-    initialize(config_path="../../../conf", job_name="test_app")
-    cfg = compose(config_name="config")
+    cfg = parse_args()
     train(cfg)
