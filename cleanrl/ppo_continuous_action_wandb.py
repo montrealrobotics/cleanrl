@@ -22,12 +22,105 @@ from src.utils import *
 import hydra
 import os
 
+
+
+def parse_args():
+    # fmt: off
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--exp-name", type=str, default=os.path.basename(__file__).rstrip(".py"),
+        help="the name of this experiment")
+    parser.add_argument("--seed", type=int, default=1,
+        help="seed of the experiment")
+    parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="if toggled, `torch.backends.cudnn.deterministic=False`")
+    parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="if toggled, cuda will be enabled by default")
+    parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="if toggled, this experiment will be tracked with Weights and Biases")
+    parser.add_argument("--wandb-project-name", type=str, default="cleanRL",
+        help="the wandb's project name")
+    parser.add_argument("--wandb-entity", type=str, default=None,
+        help="the entity (team) of wandb's project")
+    parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="whether to capture videos of the agent performances (check out `videos` folder)")
+
+    # Algorithm specific arguments
+    parser.add_argument("--env-id", type=str, default="HalfCheetah-v4",
+        help="the id of the environment")
+    parser.add_argument("--early-termination", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="whether to terminate early i.e. when the catastrophe has happened")
+    parser.add_argument("--term-cost", type=int, default=1,
+        help="how many violations before you terminate")
+    parser.add_argument("--collect-data", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="store data while trianing")
+    parser.add_argument("--storage-path", type=str, default="./data/ppo/term_1",
+        help="the storage path for the data collected")
+    
+    parser.add_argument("--total-timesteps", type=int, default=1000000,
+        help="total timesteps of the experiments")
+    parser.add_argument("--learning-rate", type=float, default=3e-4,
+        help="the learning rate of the optimizer")
+    parser.add_argument("--num-envs", type=int, default=1,
+        help="the number of parallel game environments")
+    parser.add_argument("--num-steps", type=int, default=2048,
+        help="the number of steps to run in each environment per policy rollout")
+    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="Toggle learning rate annealing for policy and value networks")
+    parser.add_argument("--gamma", type=float, default=0.99,
+        help="the discount factor gamma")
+    parser.add_argument("--gae-lambda", type=float, default=0.95,
+        help="the lambda for the general advantage estimation")
+    parser.add_argument("--num-minibatches", type=int, default=32,
+        help="the number of mini-batches")
+    parser.add_argument("--update-epochs", type=int, default=10,
+        help="the K epochs to update the policy")
+    parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="Toggles advantages normalization")
+    parser.add_argument("--clip-coef", type=float, default=0.2,
+        help="the surrogate clipping coefficient")
+    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
+    parser.add_argument("--ent-coef", type=float, default=0.0,
+        help="coefficient of the entropy")
+    parser.add_argument("--vf-coef", type=float, default=0.5,
+        help="coefficient of the value function")
+    parser.add_argument("--max-grad-norm", type=float, default=0.5,
+        help="the maximum norm for the gradient clipping")
+    parser.add_argument("--target-kl", type=float, default=None,
+        help="the target KL divergence threshold")
+    parser.add_argument("--reward-penalty", type=float, default=0,
+        help="coefficient of the value function")
+    
+    ## Arguments related to risk model 
+    parser.add_argument("--use-risk", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="Use risk model or not ")
+    parser.add_argument("--risk-actor", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="Use risk model in the actor or not ")
+    parser.add_argument("--risk-critic", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="Use risk model in the critic or not ")
+    parser.add_argument("--risk-model-path", type=str, default="./pretrained/agent.pt",
+        help="the id of the environment")
+    parser.add_argument("--binary-risk", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="Use risk model in the critic or not ")
+    parser.add_argument("--model-type", type=str, default="mlp",
+        help="specify the NN to use for the risk model")
+
+    args = parser.parse_args()
+    args.batch_size = int(args.num_envs * args.num_steps)
+    args.minibatch_size = int(args.batch_size // args.num_minibatches)
+    # fmt: on
+    return args
+
+
+
+
+
 def make_env(cfg, idx, capture_video, run_name, gamma):
     def thunk():
         if capture_video:
-            env = gym.make(cfg.env.env_id, render_mode="rgb_array", early_termination=cfg.env.early_termination, term_cost=cfg.env.term_cost)
+            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost)
         else:
-            env = gym.make(cfg.env.env_id, early_termination=cfg.env.early_termination, term_cost=cfg.env.term_cost)
+            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
@@ -129,11 +222,9 @@ class Agent(nn.Module):
 
 
 def train(cfg):
-    batch_size = int(cfg.ppo.num_envs * cfg.ppo.num_steps)
-    minibatch_size = int(batch_size // cfg.ppo.num_minibatches)
     # fmt: on
 
-    run_name = f"{cfg.ppo.env_id}__{cfg.ppo.exp_name}__{cfg.ppo.seed}__{int(time.time())}"
+    run_name = f"{cfg.env_id}__{cfg.exp_name}__{cfg.seed}__{int(time.time())}"
 
     #experiment = Experiment(
     #    api_key="FlhfmY238jUlHpcRzzuIw3j2t",
@@ -157,30 +248,30 @@ def train(cfg):
     #experiment.log_parameters(cfg.risk)
     #experiment.log_parameters(cfg.env)
     # TRY NOT TO MODIFY: seeding
-    random.seed(cfg.ppo.seed)
-    np.random.seed(cfg.ppo.seed)
-    torch.manual_seed(cfg.ppo.seed)
-    torch.backends.cudnn.deterministic = cfg.ppo.torch_deterministic
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+    torch.backends.cudnn.deterministic = cfg.torch_deterministic
 
-    device = torch.device("cuda" if torch.cuda.is_available() and cfg.ppo.cuda else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and cfg.cuda else "cpu")
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(cfg, i, cfg.ppo.capture_video, run_name, cfg.ppo.gamma) for i in range(cfg.ppo.num_envs)]
+        [make_env(cfg, i, cfg.capture_video, run_name, cfg.gamma) for i in range(cfg.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    if cfg.risk.model_type == "bayesian":
+    if cfg.model_type == "bayesian":
         risk_model_class = BayesRiskEst 
     else:
         risk_model_class = RiskEst
     print(envs.single_observation_space.shape)
 
-    if cfg.risk.use_risk:
+    if cfg.use_risk:
         agent = RiskAgent(envs=envs).to(device)
-        if os.path.exists(cfg.risk.risk_model_path):
+        if os.path.exists(cfg.risk_model_path):
             risk_model = risk_model_class(obs_size=np.array(envs.single_observation_space.shape).prod())
-            risk_model.load_state_dict(torch.load(cfg.risk.risk_model_path, map_location=device))
+            risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             risk_model.to(device)
             risk_model.eval()
         else:
@@ -188,57 +279,57 @@ def train(cfg):
     else:
         agent = Agent(envs=envs).to(device)
 
-    optimizer = optim.Adam(agent.parameters(), lr=cfg.ppo.learning_rate, eps=1e-5)
+    optimizer = optim.Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
     print(envs.single_observation_space.shape)
     # ALGO Logic: Storage setup
-    obs = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs) + envs.single_observation_space.shape).to(device)
-    actions = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs) + envs.single_action_space.shape).to(device)
-    logprobs = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs)).to(device)
-    rewards = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs)).to(device)
-    dones = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs)).to(device)
-    values = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs)).to(device)
-    costs = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs)).to(device)
-    risks = torch.zeros((cfg.ppo.num_steps, cfg.ppo.num_envs) + (2,)).to(device)
+    obs = torch.zeros((cfg.num_steps, cfg.num_envs) + envs.single_observation_space.shape).to(device)
+    actions = torch.zeros((cfg.num_steps, cfg.num_envs) + envs.single_action_space.shape).to(device)
+    logprobs = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+    rewards = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+    dones = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+    values = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+    costs = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+    risks = torch.zeros((cfg.num_steps, cfg.num_envs) + (2,)).to(device)
 
-    all_costs = torch.zeros((cfg.ppo.total_timesteps, cfg.ppo.num_envs)).to(device)
-    all_risks = torch.zeros((cfg.ppo.total_timesteps, cfg.ppo.num_envs)).to(device)
+    all_costs = torch.zeros((cfg.total_timesteps, cfg.num_envs)).to(device)
+    all_risks = torch.zeros((cfg.total_timesteps, cfg.num_envs)).to(device)
 
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset(seed=cfg.ppo.seed)
+    next_obs, _ = envs.reset(seed=cfg.seed)
     next_obs = torch.Tensor(next_obs).to(device)
-    next_done = torch.zeros(cfg.ppo.num_envs).to(device)
-    num_updates = cfg.ppo.total_timesteps // batch_size
+    next_done = torch.zeros(cfg.num_envs).to(device)
+    num_updates = cfg.total_timesteps // batch_size
 
     cum_cost, ep_cost, ep_risk_cost_int, cum_risk_cost_int, ep_risk, cum_risk = 0, 0, 0, 0, 0, 0
     cost = 0
     last_step = 0
     episode = 0
     step_log = 0
-    if cfg.ppo.collect_data:
-        storage_path = os.path.join(cfg.ppo.storage_path, run_name)
+    if cfg.collect_data:
+        storage_path = os.path.join(cfg.storage_path, run_name)
         make_dirs(storage_path, episode)
 
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
-        if cfg.ppo.anneal_lr:
+        if cfg.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
-            lrnow = frac * cfg.ppo.learning_rate
+            lrnow = frac * cfg.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
-        for step in range(0, cfg.ppo.num_steps):
-            global_step += 1 * cfg.ppo.num_envs
+        for step in range(0, cfg.num_steps):
+            global_step += 1 * cfg.num_envs
             obs[step] = next_obs
             dones[step] = next_done
             costs[step] = cost
             all_costs[global_step] = cost
 
-            if cfg.risk.use_risk:
+            if cfg.use_risk:
                 next_risk = risk_model(next_obs / 10.0).detach()
-                if cfg.risk.binary_risk:
+                if cfg.binary_risk:
                     id_risk = torch.argmax(next_risk, axis=1)
                     next_risk = torch.zeros_like(next_risk)
                     next_risk[:, id_risk] = 1
@@ -249,7 +340,7 @@ def train(cfg):
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                if cfg.risk.use_risk:
+                if cfg.use_risk:
                     action, logprob, _, value = agent.get_action_and_value(next_obs, next_risk)
                 else:
                     action, logprob, _, value = agent.get_action_and_value(next_obs)
@@ -264,7 +355,7 @@ def train(cfg):
             rewards[step] = torch.tensor(reward).to(device).view(-1)
 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'prev_action': action} 
-            if cfg.ppo.collect_data:
+            if cfg.collect_data:
                 store_data(next_obs, info_dict, storage_path, episode, step_log)
             step_log+=1 
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
@@ -290,7 +381,7 @@ def train(cfg):
 
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
 
-                if cfg.risk.use_risk:
+                if cfg.use_risk:
                     ep_risk = torch.sum(all_risks[last_step:global_step]).item()
                     cum_risk += ep_risk
 
@@ -329,26 +420,26 @@ def train(cfg):
                 last_step = global_step
                 episode += 1
                 step_log = 0
-                if cfg.ppo.collect_data:
+                if cfg.collect_data:
                     make_dirs(storage_path, episode)
 
         # bootstrap value if not done
         with torch.no_grad():
-            if cfg.risk.use_risk:
+            if cfg.use_risk:
                 next_value = agent.get_value(next_obs, next_risk).reshape(1, -1)
             else:
                 next_value = agent.get_value(next_obs).reshape(1, -1)   
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
-            for t in reversed(range(cfg.ppo.num_steps)):
-                if t == cfg.ppo.num_steps - 1:
+            for t in reversed(range(cfg.num_steps)):
+                if t == cfg.num_steps - 1:
                     nextnonterminal = 1.0 - next_done
                     nextvalues = next_value
                 else:
                     nextnonterminal = 1.0 - dones[t + 1]
                     nextvalues = values[t + 1]
-                delta = rewards[t] + cfg.ppo.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + cfg.ppo.gamma * cfg.ppo.gae_lambda * nextnonterminal * lastgaelam
+                delta = rewards[t] + cfg.gamma * nextvalues * nextnonterminal - values[t]
+                advantages[t] = lastgaelam = delta + cfg.gamma * cfg.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
         # flatten the batch
@@ -363,13 +454,13 @@ def train(cfg):
         # Optimizing the policy and value network
         b_inds = np.arange(batch_size)
         clipfracs = []
-        for epoch in range(cfg.ppo.update_epochs):
+        for epoch in range(cfg.update_epochs):
             np.random.shuffle(b_inds)
             for start in range(0, batch_size, minibatch_size):
                 end = start + minibatch_size
                 mb_inds = b_inds[start:end]
 
-                if cfg.risk.use_risk:
+                if cfg.use_risk:
                     _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_risks[mb_inds], b_actions[mb_inds])
                 else:
                     _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
@@ -381,25 +472,25 @@ def train(cfg):
                     # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > cfg.ppo.clip_coef).float().mean().item()]
+                    clipfracs += [((ratio - 1.0).abs() > cfg.clip_coef).float().mean().item()]
 
                 mb_advantages = b_advantages[mb_inds]
-                if cfg.ppo.norm_adv:
+                if cfg.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - cfg.ppo.clip_coef, 1 + cfg.ppo.clip_coef)
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - cfg.clip_coef, 1 + cfg.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
                 newvalue = newvalue.view(-1)
-                if cfg.ppo.clip_vloss:
+                if cfg.clip_vloss:
                     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
                     v_clipped = b_values[mb_inds] + torch.clamp(
                         newvalue - b_values[mb_inds],
-                        -cfg.ppo.clip_coef,
-                        cfg.ppo.clip_coef,
+                        -cfg.clip_coef,
+                        cfg.clip_coef,
                     )
                     v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
@@ -408,15 +499,15 @@ def train(cfg):
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                loss = pg_loss - cfg.ppo.ent_coef * entropy_loss + v_loss * cfg.ppo.vf_coef
+                loss = pg_loss - cfg.ent_coef * entropy_loss + v_loss * cfg.vf_coef
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), cfg.ppo.max_grad_norm)
+                nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
                 optimizer.step()
 
-            if cfg.ppo.target_kl != "None":
-                if approx_kl > cfg.ppo.target_kl:
+            if cfg.target_kl != "None":
+                if approx_kl > cfg.target_kl:
                     break
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
