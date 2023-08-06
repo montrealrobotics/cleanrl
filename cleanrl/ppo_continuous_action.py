@@ -256,12 +256,12 @@ def train(cfg):
             step_log+=1 
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
 
-            if not done:
-                cost = torch.Tensor(infos["cost"]).to(device).view(-1)
-                ep_cost += infos["cost"]; cum_cost += infos["cost"]
-            else:
-                cost = torch.Tensor(np.array([infos["final_info"][0]["cost"]])).to(device).view(-1)
-                ep_cost += np.array([infos["final_info"][0]["cost"]]); cum_cost += np.array([infos["final_info"][0]["cost"]])
+            # if not done:
+            cost = torch.Tensor(infos["cost"]).to(device).view(-1)
+            ep_cost += infos["cost"]; cum_cost += infos["cost"]
+            # else:
+            #     cost = torch.Tensor(np.array([infos["final_info"][0]["cost"]])).to(device).view(-1)
+            #     ep_cost += np.array([infos["final_info"][0]["cost"]]); cum_cost += np.array([infos["final_info"][0]["cost"]])
 
             # Only print when at least 1 env is done
             if "final_info" not in infos:
