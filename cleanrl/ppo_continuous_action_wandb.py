@@ -287,18 +287,18 @@ def fine_tune_risk(cfg, model, inputs, targets, opt, device):
 def train(cfg):
     # fmt: on
 
-    run_name = f"{cfg.env_id}__{cfg.exp_name}__{cfg.seed}__{int(time.time())}"
+    run_name = f"{int(time.time())}"
 
     #experiment = Experiment(
     #    api_key="FlhfmY238jUlHpcRzzuIw3j2t",
     #    project_name="risk-aware-exploration",
     #    workspace="hbutsuak95",
     #)      
-    import wandb 
-    wandb.init(config=vars(cfg), entity="kaustubh95",
-                 project="risk_aware_exploration",
-                 name=run_name, monitor_gym=True,
-                 sync_tensorboard=True, save_code=True)
+    #import wandb 
+    #wandb.init(config=vars(cfg), entity="kaustubh95",
+    #             project="risk_aware_exploration",
+    #             name=run_name, monitor_gym=True,
+    #             sync_tensorboard=True, save_code=True)
 
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
@@ -374,11 +374,13 @@ def train(cfg):
     f_obs = next_obs
     f_risks = torch.Tensor([[0.]]).to(device)
     f_ep_len = [0]
+    f_actions = None
+
     # print(f_obs.size(), f_risks.size())
 
 
     if cfg.collect_data:
-        storage_path = os.path.join(cfg.storage_path, run_name)
+        storage_path = os.path.join(cfg.storage_path, cfg.env_id, run_name)
         make_dirs(storage_path, episode)
 
     
@@ -418,7 +420,7 @@ def train(cfg):
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
-            
+                    
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
@@ -427,15 +429,18 @@ def train(cfg):
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'prev_action': action} 
             if cfg.collect_data:
                 store_data(next_obs, info_dict, storage_path, episode, step_log)
-            step_log+=1 
+            
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
             f_obs = torch.concat([f_obs, next_obs], axis=0)
             f_risks = torch.concat([f_risks, risk], axis=0)
+            f_actions = action if f_actions is None else torch.concat([f_actions, action], axis=0)
             # print(f_risks.size(), f_obs.size())
 
             if cost > 0:
+                fear_radius = min(cfg.fear_radius, step_log)
                 f_risks[global_step-cfg.fear_radius:, 0] = 1.
             
+            step_log += 1
             if not done:
                 cost = torch.Tensor(infos["cost"]).to(device).view(-1)
                 ep_cost += infos["cost"]; cum_cost += infos["cost"]
@@ -627,6 +632,7 @@ def train(cfg):
     ## Save all the data
     if cfg.collect_data:
         torch.save(f_obs, os.path.join(storage_path, "obs.pt"))
+        torch.save(f_actions, os.path.join(storage_path, "actions.pt"))
         torch.save(f_risks, os.path.join(storage_path, "risks.pt"))
         torch.save(torch.Tensor(f_ep_len), os.path.join(storage_path, "ep_len.pt"))
     print(f_ep_len)
