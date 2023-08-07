@@ -58,7 +58,7 @@ def parse_args():
     parser.add_argument("--storage-path", type=str, default="./data/ppo/term_1",
         help="the storage path for the data collected")
     
-    parser.add_argument("--total-timesteps", type=int, default=1000000,
+    parser.add_argument("--total-timesteps", type=int, default=10000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=3e-4,
         help="the learning rate of the optimizer")
@@ -94,7 +94,7 @@ def parse_args():
         help="coefficient of the value function")
     
     ## Arguments related to risk model 
-    parser.add_argument("--use-risk", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+    parser.add_argument("--use-risk", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Use risk model or not ")
     parser.add_argument("--risk-actor", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Use risk model in the actor or not ")
@@ -294,17 +294,17 @@ def train(cfg):
     #    project_name="risk-aware-exploration",
     #    workspace="hbutsuak95",
     #)      
-    # import wandb 
-    # wandb.init(config=vars(cfg), entity="kaustubh95",
-    #             project="risk_aware_exploration",
-    #             name=run_name, monitor_gym=True,
-    #             sync_tensorboard=True, save_code=True)
+    import wandb 
+    wandb.init(config=vars(cfg), entity="kaustubh95",
+                 project="risk_aware_exploration",
+                 name=run_name, monitor_gym=True,
+                 sync_tensorboard=True, save_code=True)
 
     writer = SummaryWriter(f"runs/{run_name}")
-    #writer.add_text(
-    #    "hyperparameters",
-    #    "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(cfg.).items()])),
-    #)
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(cfg).items()])),
+    )
 
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -373,7 +373,7 @@ def train(cfg):
     ## Finetuning data collection 
     f_obs = next_obs
     f_risks = torch.Tensor([[0.]]).to(device)
-
+    f_ep_len = [0]
     # print(f_obs.size(), f_risks.size())
 
 
@@ -381,6 +381,7 @@ def train(cfg):
         storage_path = os.path.join(cfg.storage_path, run_name)
         make_dirs(storage_path, episode)
 
+    
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if cfg.anneal_lr:
@@ -489,7 +490,8 @@ def train(cfg):
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 writer.add_scalar("charts/episodic_cost", ep_cost, global_step)
                 writer.add_scalar("charts/cummulative_cost", cum_cost, global_step)
-
+                #print(info["episode"]["l"])
+                f_ep_len.append(f_ep_len[-1]+info["episode"]["l"][0])
 
 #                wandb.log({"charts/episodic_return":info["episode"]["r"]}, step=global_step)
 
@@ -622,7 +624,12 @@ def train(cfg):
         #experiment.log_metric("losses/explained_variance", explained_var, global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         #experiment.log_metric("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-
+    ## Save all the data
+    if cfg.collect_data:
+        torch.save(f_obs, os.path.join(storage_path, "obs.pt"))
+        torch.save(f_risks, os.path.join(storage_path, "risks.pt"))
+        torch.save(torch.Tensor(f_ep_len), os.path.join(storage_path, "ep_len.pt"))
+    print(f_ep_len)
     envs.close()
     writer.close()
     return 1 
