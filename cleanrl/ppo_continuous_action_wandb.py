@@ -53,6 +53,8 @@ def parse_args():
         help="whether to terminate early i.e. when the catastrophe has happened")
     parser.add_argument("--term-cost", type=int, default=1,
         help="how many violations before you terminate")
+    parser.add_argument("--failure-penalty", type=float, default=0.0,
+        help="Reward Penalty when you fail")
     parser.add_argument("--collect-data", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="store data while trianing")
     parser.add_argument("--storage-path", type=str, default="./data/ppo/term_1",
@@ -134,9 +136,9 @@ def parse_args():
 def make_env(cfg, idx, capture_video, run_name, gamma):
     def thunk():
         if capture_video:
-            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost)
+            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty)
         else:
-            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost)
+            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
@@ -174,12 +176,18 @@ class RiskAgent(nn.Module):
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
         self.tanh = nn.Tanh()
 
-        self.risk_encoder = nn.Sequential(
+        self.risk_encoder_actor = nn.Sequential(
             layer_init(nn.Linear(2, 12)),
             nn.Tanh())
 
+        self.risk_encoder_critic = nn.Sequential(
+            layer_init(nn.Linear(2, 12)),
+            nn.Tanh())
+
+
+
     def forward_actor(self, x, risk):
-        risk = self.risk_encoder(risk)
+        risk = self.risk_encoder_actor(risk)
         x = self.tanh(self.actor_fc1(x))
         x = self.tanh(self.actor_fc2(torch.cat([x, risk], axis=1)))
         x = self.tanh(self.actor_fc3(x))
@@ -188,7 +196,7 @@ class RiskAgent(nn.Module):
 
 
     def get_value(self, x, risk):
-        risk = self.risk_encoder(risk)
+        risk = self.risk_encoder_critic(risk)
         x = self.tanh(self.critic_fc1(x))
         x = self.tanh(self.critic_fc2(torch.cat([x, risk], axis=1)))
         value = self.tanh(self.critic_fc3(x))
@@ -294,11 +302,11 @@ def train(cfg):
     #    project_name="risk-aware-exploration",
     #    workspace="hbutsuak95",
     #)      
-    #import wandb 
-    #wandb.init(config=vars(cfg), entity="kaustubh95",
-    #             project="risk_aware_exploration",
-    #             name=run_name, monitor_gym=True,
-    #             sync_tensorboard=True, save_code=True)
+    import wandb 
+    wandb.init(config=vars(cfg), entity="kaustubh95",
+                 project="risk_aware_exploration",
+                 name=run_name, monitor_gym=True,
+                 sync_tensorboard=True, save_code=True)
 
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
@@ -380,6 +388,7 @@ def train(cfg):
 
 
     if cfg.collect_data:
+        #os.system("rm -rf %s"%cfg.storage_path)
         storage_path = os.path.join(cfg.storage_path, cfg.env_id, run_name)
         make_dirs(storage_path, episode)
 
