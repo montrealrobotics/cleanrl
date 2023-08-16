@@ -123,6 +123,10 @@ def parse_args():
         help="number of epochs to update the risk model")
     parser.add_argument("--fine-tune-risk", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
+    parser.add_argument("--start-risk-update", type=int, default=10000,
+        help="number of epochs to update the risk model") 
+    parser.add_argument("--rb-type", type=str, default="balanced",
+        help="which type of replay buffer to use for ")
     
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -289,8 +293,15 @@ def fine_tune_risk(cfg, model, inputs, targets, opt, device):
         return model
             
             
-
-
+def risk_sgd_step(cfg, model, batch, criterion, opt, device):
+        pred = model(batch["next_obs"].to(device))
+        if cfg.model_type == "mlp":
+            loss = criterion(pred, batch["risks"].to(device))
+        else:
+            loss = criterion(pred, torch.argmax(batch["risks"].squeeze(), axis=1).to(device))
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
 
 
 def train(cfg):
@@ -303,11 +314,11 @@ def train(cfg):
     #    project_name="risk-aware-exploration",
     #    workspace="hbutsuak95",
     #)      
-    # import wandb 
-    # wandb.init(config=vars(cfg), entity="kaustubh95",
-    #              project="risk_aware_exploration",
-    #              name=run_name, monitor_gym=True,
-    #              sync_tensorboard=True, save_code=True)
+    import wandb 
+    wandb.init(config=vars(cfg), entity="kaustubh95",
+                 project="risk_aware_exploration",
+                 name=run_name, monitor_gym=True,
+                 sync_tensorboard=True, save_code=True)
 
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
@@ -335,7 +346,15 @@ def train(cfg):
     # print(envs.single_observation_space.shape)
 
     if cfg.fine_tune_risk:
-        rb = ReplayBuffer(buffer_size=1e6, observation_space=envs.single_observation_space, action_space=envs.single_action_space)
+        if cfg.rb_type == "balanced":
+            rb = ReplayBufferBalanced(buffer_size=cfg.total_timesteps)
+        else:
+            rb = ReplayBuffer(buffer_size=cfg.total_timesteps)
+                          #, observation_space=envs.single_observation_space, action_space=envs.single_action_space)
+        if cfg.model_type == "bayesian":
+            criterion = nn.NLLLoss(weight=torch.Tensor([1, 1.]).to(device))
+        else:
+            criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([1, 1.]).to(device))
 
     if cfg.use_risk:
         agent = RiskAgent(envs=envs).to(device)
@@ -372,11 +391,11 @@ def train(cfg):
     global_step = 0
     start_time = time.time()
     next_obs, _ = envs.reset(seed=cfg.seed)
-    obs_ = next_obs
+
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(cfg.num_envs).to(device)
     num_updates = cfg.total_timesteps // cfg.batch_size
-
+    obs_ = next_obs
     cum_cost, ep_cost, ep_risk_cost_int, cum_risk_cost_int, ep_risk, cum_risk = 0, 0, 0, 0, 0, 0
     cost = 0
     last_step = 0
@@ -392,6 +411,8 @@ def train(cfg):
     f_rewards = None
     f_dones = None
     f_costs = None
+
+    risk_ = torch.Tensor([[1., 0.]]).to(device)
     # print(f_obs.size(), f_risks.size())
 
 
@@ -417,7 +438,7 @@ def train(cfg):
             all_costs[global_step] = cost
 
             if cfg.use_risk:
-                next_risk = risk_model(next_obs / 10.0).detach()
+                next_risk = risk_model(next_obs).detach()
                 if cfg.binary_risk:
                     id_risk = torch.argmax(next_risk, axis=1)
                     next_risk = torch.zeros_like(next_risk)
@@ -447,20 +468,6 @@ def train(cfg):
             if cfg.collect_data:
                 store_data(next_obs, info_dict, storage_path, episode, step_log)
 
-            f_obs = obs_ if f_obs is None else np.concatenate([f_obs, obs_], axis=0)
-            f_next_obs = next_obs if f_next_obs is None else np.concatenate([f_next_obs, next_obs], axis=0)
-            f_actions = action if f_actions is None else np.concatenate([f_actions, action], axis=0)
-            f_rewards = reward if f_rewards is None else np.concatenate([f_rewards, reward], axis=0)
-            f_risks = risk if f_risks is None else np.concatenate([f_risks, risk], axis=0)
-            f_costs = np.array([cost]) if f_costs is None else np.concatenate([f_costs, np.array([cost])], axis=0)
-            f_dones = np.array([done]) if f_dones is None else np.concatenate([f_dones, np.array([done])], axis=0)
-
-            obs_ = next_obs
-            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
-
-            # print(f_risks.size(), f_obs.size())
-
-
             step_log += 1
             if not done:
                 cost = torch.Tensor(infos["cost"]).to(device).view(-1)
@@ -470,13 +477,25 @@ def train(cfg):
                 ep_cost += np.array([infos["final_info"][0]["cost"]]); cum_cost += np.array([infos["final_info"][0]["cost"]])
 
 
-            if cost > 0:
-                fear_radius = min(cfg.fear_radius, step_log)
-                f_risks[global_step-fear_radius:, 0] = 1.
-            
+            next_obs, next_done, reward = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device), torch.Tensor(reward).to(device)
 
-            if global_step % cfg.update_risk_model == 0 and cfg.fine_tune_risk:
-                fine_tune_risk(cfg, risk_model, f_obs[-cfg.num_risk_datapoints:], f_risks[-cfg.num_risk_datapoints:], opt_risk, device)
+            if cfg.fine_tune_risk:
+                f_obs = obs_ if f_obs is None else torch.concat([f_obs, obs_], axis=0)
+                f_next_obs = next_obs if f_next_obs is None else torch.concat([f_next_obs, next_obs], axis=0)
+                f_actions = action if f_actions is None else torch.concat([f_actions, action], axis=0)
+                f_rewards = reward if f_rewards is None else torch.concat([f_rewards, reward], axis=0)
+                f_risks = risk_ if f_risks is None else torch.concat([f_risks, risk_], axis=0)
+                f_costs = cost if f_costs is None else torch.concat([f_costs, cost], axis=0)
+                f_dones = next_done if f_dones is None else torch.concat([f_dones, next_done], axis=0)
+
+
+
+            obs_ = next_obs
+            # if global_step % cfg.update_risk_model == 0 and cfg.fine_tune_risk:
+            if global_step > cfg.start_risk_update:
+                batch = rb.sample(cfg.risk_batch_size)
+                risk_sgd_step(cfg, risk_model, batch, criterion, opt_risk, device)
+                # fine_tune_risk(cfg, risk_model, f_obs[-cfg.num_risk_datapoints:], f_risks[-cfg.num_risk_datapoints:], opt_risk, device)
 
 
             # Only print when at least 1 env is done
@@ -498,7 +517,7 @@ def train(cfg):
                     ep_risk = torch.sum(all_risks[last_step:global_step]).item()
                     cum_risk += ep_risk
 
-                    risk_cost_int = torch.logical_and(f_risks[last_step:global_step], all_risks[last_step:global_step])
+                    risk_cost_int = torch.logical_and(f_risks, all_risks[last_step:global_step])
                     ep_risk_cost_int = torch.sum(risk_cost_int).item()
                     cum_risk_cost_int += ep_risk_cost_int
 
@@ -535,12 +554,17 @@ def train(cfg):
                 episode += 1
                 step_log = 0
                 
-                for i in range(f_obs.shape[0]):
-                    dist_to_fail = f_obs.shape[0] - i if cost > 0 else f_obs.shape[0]
-                    rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], [{"risk": f_risks[i], "cost": f_costs[i], "distance_to_failure": dist_to_fail}])
+                f_dist_to_fail = torch.Tensor(np.array(list(reversed(range(f_obs.size()[0]))))).to(device) if cost > 0 else torch.Tensor(np.array([f_obs.size()[0]]*f_obs.shape[0])).to(device)
+                if cfg.rb_type == "balanced":
+                    idx_risky = (f_dist_to_fail<=cfg.fear_radius)
+                    idx_safe = (f_dist_to_fail>cfg.fear_radius)
 
+                    rb.add_risky(f_obs[idx_risky], f_next_obs[idx_risky], f_actions[idx_risky], f_rewards[idx_risky], f_dones[idx_risky], f_costs[idx_risky], f_risks[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
+                    rb.add_safe(f_obs[idx_safe], f_next_obs[idx_safe], f_actions[idx_safe], f_rewards[idx_safe], f_dones[idx_safe], f_costs[idx_safe], f_risks[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
+                else:
+                    rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks, f_dist_to_fail.unsqueeze(1))
 
-                f_obs = None
+                f_obs = None    
                 f_next_obs = None
                 f_risks = None
                 f_ep_len = None
