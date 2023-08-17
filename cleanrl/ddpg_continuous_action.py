@@ -5,7 +5,7 @@ import random
 import time
 from distutils.util import strtobool
 
-import gym, safety_gym
+import gymnasium as gym, safety_gymnasium
 import numpy as np
 import torch
 import torch.nn as nn
@@ -13,6 +13,10 @@ import torch.nn.functional as F
 import torch.optim as optim
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
+
+
+from src.models.risk_models import *
+from src.utils import *
 
 
 def parse_args():
@@ -36,8 +40,14 @@ def parse_args():
         help="whether to capture videos of the agent performances (check out `videos` folder)")
 
     # Algorithm specific arguments
-    parser.add_argument("--env-id", type=str, default="HalfCheetah-v4",
+    parser.add_argument("--env-id", type=str, default="SafetyCarButton1Gymnasium-v0",
         help="the id of the environment")
+    parser.add_argument("--early-termination", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="whether to terminate early i.e. when the catastrophe has happened")
+    parser.add_argument("--term-cost", type=int, default=1,
+        help="how many violations before you terminate")
+    parser.add_argument("--failure-penalty", type=float, default=0.0,
+        help="Reward Penalty when you fail")
     parser.add_argument("--num-envs", type=int, default=1,
         help="the number of parallel game environments")
     parser.add_argument("--total-timesteps", type=int, default=1000000,
@@ -80,12 +90,12 @@ def parse_args():
     return args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def make_env(args, seed, idx, capture_video, run_name):
     def thunk():
         if capture_video:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.make(args.env_id, early_termination=args.early_termination, term_cost=args.term_cost, failure_penalty=args.failure_penalty, render_mode="rgb_array")
         else:
-            env = gym.make(env_id)
+            env = gym.make(args.env_id, early_termination=args.early_termination, term_cost=args.term_cost, failure_penalty=args.failure_penalty)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
             if idx == 0:
@@ -171,68 +181,6 @@ class Actor(nn.Module):
 
 
 
-class RiskEst(nn.Module):
-    def __init__(self, obs_size=64, fc1_size=128, fc2_size=128, fc3_size=128, fc4_size=128, out_size=2):
-        super().__init__()
-        self.obs_size = obs_size
-        self.fc1 = nn.Linear(obs_size, fc1_size)
-        self.fc2 = nn.Linear(fc1_size, fc2_size)
-        self.fc3 = nn.Linear(fc2_size, fc3_size)
-        self.fc4 = nn.Linear(fc3_size, fc4_size)
-        self.out = nn.Linear(fc4_size, out_size)
-
-        ## Batch Norm layers
-        self.bnorm1 = nn.BatchNorm1d(fc1_size)
-        self.bnorm2 = nn.BatchNorm1d(fc2_size)
-        self.bnorm3 = nn.BatchNorm1d(fc3_size)
-        self.bnorm4 = nn.BatchNorm1d(fc4_size)
-
-        # Activation functions
-        self.relu = nn.ReLU()
-        self.sigmoid = nn.Sigmoid()
-        self.tanh = nn.Tanh()
-        self.softmax = nn.Softmax(dim=1)
-        self.dropout = nn.Dropout(0.2)
-
-    def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-        x = self.relu(self.dropout(self.fc3(x)))
-        x = self.relu(self.dropout(self.fc4(x)))
-        out = self.softmax(self.out(x))
-        return out
-
-class BayesRiskEst(nn.Module):
-    def __init__(self, obs_size=64, fc1_size=128, fc2_size=128, fc3_size=128, fc4_size=128, out_size=2):
-        super().__init__()
-        self.obs_size = obs_size
-        self.fc1 = nn.Linear(obs_size, fc1_size)
-        self.fc2 = nn.Linear(fc1_size, fc2_size)
-        self.fc3 = nn.Linear(fc2_size, fc3_size)
-        self.fc4 = nn.Linear(fc3_size, fc4_size)
-        self.out = nn.Linear(fc4_size, out_size)
-
-        ## Batch Norm layers
-        self.bnorm1 = nn.BatchNorm1d(fc1_size)
-        self.bnorm2 = nn.BatchNorm1d(fc2_size)
-        self.bnorm3 = nn.BatchNorm1d(fc3_size)
-        self.bnorm4 = nn.BatchNorm1d(fc4_size)
-
-        # Activation functions
-        self.relu = nn.ReLU()
-        self.sigmoid = nn.Sigmoid()
-        self.tanh = nn.Tanh()
-        self.softmax = nn.Softmax(dim=1)
-        self.dropout = nn.Dropout(0.2)
-        self.logsoftmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, x):
-        x = self.bnorm1(self.relu(self.fc1(x)))
-        x = self.bnorm2(self.relu(self.fc2(x)))
-        x = self.bnorm3(self.relu(self.dropout(self.fc3(x))))
-        x = self.bnorm4(self.relu(self.dropout(self.fc4(x))))
-        out = self.logsoftmax(self.out(x))
-        return out
 
 
 
@@ -276,7 +224,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    envs = gym.vector.SyncVectorEnv([make_env(args, args.seed, 0, args.capture_video, run_name)])
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     if args.model_type == "bayesian":
@@ -287,7 +235,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     print(envs.single_observation_space.shape)
     if args.use_risk:
         if os.path.exists(args.risk_model_path):
-            risk_model = risk_model_class(obs_size=np.array(envs.single_observation_space.shape).prod())
+            risk_model = risk_model_class(obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=True)
             risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
             risk_model.to(device)
             risk_model.eval()
@@ -356,8 +304,9 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         if "final_info" in infos:
             for info in infos["final_info"]:
-
-                ep_cost = torch.sum(all_costs[last_step:global_step]).item()
+                if cost > 0:
+                    ep_cost = 1.
+                #ep_cost = torch.sum(all_costs[last_step:global_step]).item()
                 cum_cost += ep_cost
 
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episodic_cost={ep_cost}")
