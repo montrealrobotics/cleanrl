@@ -314,11 +314,11 @@ def train(cfg):
     #    project_name="risk-aware-exploration",
     #    workspace="hbutsuak95",
     #)      
-    import wandb 
-    wandb.init(config=vars(cfg), entity="kaustubh95",
-                 project="risk_aware_exploration",
-                 name=run_name, monitor_gym=True,
-                 sync_tensorboard=True, save_code=True)
+    # import wandb 
+    # wandb.init(config=vars(cfg), entity="kaustubh95",
+    #              project="risk_aware_exploration",
+    #              name=run_name, monitor_gym=True,
+    #              sync_tensorboard=True, save_code=True)
 
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
@@ -445,7 +445,7 @@ def train(cfg):
                     next_risk[:, id_risk] = 1
                 # print(next_risk)
                 risks[step] = next_risk
-                all_risks[global_step] = torch.argmax(next_risk, axis=-1)
+                all_risks[global_step] = next_risk[:,1] / torch.sum(next_risk)
 
 
             # ALGO LOGIC: action logic
@@ -511,7 +511,7 @@ def train(cfg):
                 if info is None:
                     continue
 
-                last_step = global_step
+                # last_step = global_step
                 episode += 1
                 step_log = 0
 
@@ -534,9 +534,12 @@ def train(cfg):
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
 
                 if cfg.use_risk:
-                    ep_risk = torch.sum(torch.argmax(f_risks, 1))
+                    ep_risks = all_risks[last_step:global_step]
+                    ep_risk = torch.mean(ep_risks)
                     #ep_risk = torch.sum(all_risks[last_step:global_step]).item()
                     cum_risk += ep_risk
+
+                    risk_pred_vs_true = torch.mean(ep_risks[torch.argmax(f_risks, 1)==1.0])
 
                     #risk_cost_int = torch.logical_and(f_risks, all_risks[last_step:global_step])
                     #ep_risk_cost_int = torch.sum(risk_cost_int).item()
@@ -544,6 +547,7 @@ def train(cfg):
 
                     writer.add_scalar("charts/episodic_risk", ep_risk, global_step)
                     writer.add_scalar("charts/cummulative_risk", cum_risk, global_step)
+                    writer.add_scalar("charts/risk_pred_vs_true", risk_pred_vs_true, global_step)
                     #writer.add_scalar("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
                     #writer.add_scalar("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
 
@@ -553,7 +557,8 @@ def train(cfg):
                     #experiment.log_metric("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
                     #experiment.log_metric("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
 
-                    #print(f"global_step={global_step}, ep_Risk_cost_int={ep_risk_cost_int}, cum_Risk_cost_int={cum_risk_cost_int}")
+                    print(f"global_step={global_step}, risk_pred_vs_true={risk_pred_vs_true}")
+                    # print(f"global_step={global_step}, ep_Risk_cost_int={ep_risk_cost_int}, cum_Risk_cost_int={cum_risk_cost_int}")
                     #print(f"global_step={global_step}, episodic_risk={ep_risk}, cum_risks={cum_risk}, cum_costs={cum_cost}")
 
 
