@@ -307,19 +307,20 @@ def risk_sgd_step(cfg, model, batch, criterion, opt, device):
 def train(cfg):
     # fmt: on
 
-    run_name = f"{int(time.time())}"
+    #run_name = f"{int(time.time())}"
 
     #experiment = Experiment(
     #    api_key="FlhfmY238jUlHpcRzzuIw3j2t",
     #    project_name="risk-aware-exploration",
     #    workspace="hbutsuak95",
     #)      
-    # import wandb 
-    # wandb.init(config=vars(cfg), entity="kaustubh95",
-    #              project="risk_aware_exploration",
-    #              name=run_name, monitor_gym=True,
-    #              sync_tensorboard=True, save_code=True)
+    import wandb 
+    run = wandb.init(config=vars(cfg), entity="kaustubh95",
+                  project="risk_aware_exploration",
+                  monitor_gym=True,
+                  sync_tensorboard=True, save_code=True)
 
+    run_name = run.name
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
@@ -360,7 +361,7 @@ def train(cfg):
         agent = RiskAgent(envs=envs).to(device)
         if os.path.exists(cfg.risk_model_path):
             risk_model = risk_model_class(obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=True)
-            risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=torch.device('cpu')))
+            risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             risk_model.to(device)
             if cfg.fine_tune_risk:
                 opt_risk = optim.Adam(risk_model.parameters(), lr=cfg.risk_lr, eps=1e-5)
@@ -406,22 +407,21 @@ def train(cfg):
     f_obs = None
     f_next_obs = None
     f_risks = None
-    f_ep_len = None
+    f_ep_len = [0]
     f_actions = None
     f_rewards = None
     f_dones = None
     f_costs = None
 
-    risk_ = torch.Tensor([[1., 0.]]).to(device)
+    # risk_ = torch.Tensor([[1., 0.]]).to(device)
     # print(f_obs.size(), f_risks.size())
-
+    all_data = None
 
     if cfg.collect_data:
         #os.system("rm -rf %s"%cfg.storage_path)
-        storage_path = os.path.join(cfg.storage_path, cfg.env_id, run_name)
+        storage_path = os.path.join(cfg.storage_path, cfg.env_id, run.name)
         make_dirs(storage_path, episode)
 
-    
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if cfg.anneal_lr:
@@ -445,7 +445,7 @@ def train(cfg):
                     next_risk[:, id_risk] = 1
                 # print(next_risk)
                 risks[step] = next_risk
-                all_risks[global_step] = next_risk[:,1] / torch.sum(next_risk)
+                all_risks[global_step] = torch.argmax(next_risk, axis=-1)
 
 
             # ALGO LOGIC: action logic
@@ -465,8 +465,8 @@ def train(cfg):
             rewards[step] = torch.tensor(reward).to(device).view(-1)
 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'obs': obs} 
-            if cfg.collect_data:
-                store_data(next_obs, info_dict, storage_path, episode, step_log)
+            # if cfg.collect_data:
+            #     store_data(next_obs, info_dict, storage_path, episode, step_log)
 
             step_log += 1
             if not done:
@@ -479,23 +479,20 @@ def train(cfg):
 
             next_obs, next_done, reward = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device), torch.Tensor(reward).to(device)
 
-            if True:# cfg.fine_tune_risk:
+            if cfg.fine_tune_risk or cfg.collect_data:
                 f_obs = obs_ if f_obs is None else torch.concat([f_obs, obs_], axis=0)
                 f_next_obs = next_obs if f_next_obs is None else torch.concat([f_next_obs, next_obs], axis=0)
                 f_actions = action if f_actions is None else torch.concat([f_actions, action], axis=0)
                 f_rewards = reward if f_rewards is None else torch.concat([f_rewards, reward], axis=0)
-                f_risks = risk_ if f_risks is None else torch.concat([f_risks, risk_], axis=0)
+                # f_risks = risk_ if f_risks is None else torch.concat([f_risks, risk_], axis=0)
                 f_costs = cost if f_costs is None else torch.concat([f_costs, cost], axis=0)
                 f_dones = next_done if f_dones is None else torch.concat([f_dones, next_done], axis=0)
 
-            if cost > 0:
-                f_risks[-cfg.fear_radius:,0] = 0.
-                f_risks[-cfg.fear_radius:,1] = 1.
 
 
             obs_ = next_obs
             # if global_step % cfg.update_risk_model == 0 and cfg.fine_tune_risk:
-            if cfg.fine_tune_risk and global_step > cfg.start_risk_update:
+            if global_step > cfg.start_risk_update and cfg.fine_tune_risk:
                 batch = rb.sample(cfg.risk_batch_size)
                 risk_sgd_step(cfg, risk_model, batch, criterion, opt_risk, device)
                 # fine_tune_risk(cfg, risk_model, f_obs[-cfg.num_risk_datapoints:], f_risks[-cfg.num_risk_datapoints:], opt_risk, device)
@@ -510,13 +507,51 @@ def train(cfg):
                 # Skip the envs that are not done
                 if info is None:
                     continue
+                ep_cost = torch.sum(all_costs[last_step:global_step]).item()
+                cum_cost += ep_cost
 
-                # last_step = global_step
+                print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
+
+                if cfg.use_risk:
+                    ep_risk = torch.sum(all_risks[last_step:global_step]).item()
+                    cum_risk += ep_risk
+
+                    risk_cost_int = torch.logical_and(f_risks, all_risks[last_step:global_step])
+                    ep_risk_cost_int = torch.sum(risk_cost_int).item()
+                    cum_risk_cost_int += ep_risk_cost_int
+
+                    writer.add_scalar("charts/episodic_risk", ep_risk, global_step)
+                    writer.add_scalar("charts/cummulative_risk", cum_risk, global_step)
+                    writer.add_scalar("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
+                    writer.add_scalar("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
+
+
+                    #experiment.log_metric("charts/episodic_risk", ep_risk, global_step)
+                    #experiment.log_metric("charts/cummulative_risk", cum_risk, global_step)
+                    #experiment.log_metric("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
+                    #experiment.log_metric("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
+
+                    print(f"global_step={global_step}, ep_Risk_cost_int={ep_risk_cost_int}, cum_Risk_cost_int={cum_risk_cost_int}")
+                    print(f"global_step={global_step}, episodic_risk={ep_risk}, cum_risks={cum_risk}, cum_costs={cum_cost}")
+
+
+
+                writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                writer.add_scalar("charts/episodic_cost", ep_cost, global_step)
+                writer.add_scalar("charts/cummulative_cost", cum_cost, global_step)
+                last_step = global_step
                 episode += 1
                 step_log = 0
 
-                f_dist_to_fail = torch.Tensor(np.array(list(reversed(range(f_obs.size()[0]))))).to(device) if cost > 0 else torch.Tensor(np.array([f_obs.size()[0]]*f_obs.shape[0])).to(device)
+                f_ep_len.append(f_ep_len[-1] + int(info["episode"]["l"]))
+                # f_dist_to_fail = torch.Tensor(np.array(list(reversed(range(f_obs.size()[0]))))).to(device) if cost > 0 else torch.Tensor(np.array([f_obs.size()[0]]*f_obs.shape[0])).to(device)
+                e_risks = torch.Tensor(np.array(list(reversed(range(int(info["episode"]["l"])))))).to(device) if cost > 0 else torch.Tensor(np.array([int(info["episode"]["l"])]*int(info["episode"]["l"]))).to(device)
+                # print(risks.size())
+                if cfg.fine_tune_risk or cfg.collect_data:
+                    f_risks = e_risks.unsqueeze(1) if f_risks is None else torch.cat([f_risks, e_risks.unsqueeze(1)], axis=0)
                 if cfg.fine_tune_risk:
+
                     if cfg.rb_type == "balanced":
                         idx_risky = (f_dist_to_fail<=cfg.fear_radius)
                         idx_safe = (f_dist_to_fail>cfg.fear_radius)
@@ -525,71 +560,24 @@ def train(cfg):
                         rb.add_safe(f_obs[idx_safe], f_next_obs[idx_safe], f_actions[idx_safe], f_rewards[idx_safe], f_dones[idx_safe], f_costs[idx_safe], f_risks[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
                     else:
                         rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks, f_dist_to_fail.unsqueeze(1))
-              
 
-                #ep_cost = torch.sum(all_costs[last_step:global_step]).item()
-                ep_cost = torch.sum(f_costs).item()
-                cum_cost += ep_cost
+                    f_obs = None    
+                    f_next_obs = None
+                    f_risks = None
+                    f_ep_len = None
+                    f_actions = None
+                    f_rewards = None
+                    f_dones = None
+                    f_costs = None
 
-                print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
-
-                if cfg.use_risk:
-                    ep_risks = all_risks[last_step:global_step]
-                    ep_risk = torch.mean(ep_risks)
-                    #ep_risk = torch.sum(all_risks[last_step:global_step]).item()
-                    cum_risk += ep_risk
-
-                    risk_pred_vs_true = torch.mean(ep_risks[torch.argmax(f_risks, 1)==1.0])
-
-                    #risk_cost_int = torch.logical_and(f_risks, all_risks[last_step:global_step])
-                    #ep_risk_cost_int = torch.sum(risk_cost_int).item()
-                    #cum_risk_cost_int += ep_risk_cost_int
-
-                    writer.add_scalar("charts/episodic_risk", ep_risk, global_step)
-                    writer.add_scalar("charts/cummulative_risk", cum_risk, global_step)
-                    writer.add_scalar("charts/risk_pred_vs_true", risk_pred_vs_true, global_step)
-                    #writer.add_scalar("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
-                    #writer.add_scalar("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
-
-
-                    #experiment.log_metric("charts/episodic_risk", ep_risk, global_step)
-                    #experiment.log_metric("charts/cummulative_risk", cum_risk, global_step)
-                    #experiment.log_metric("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
-                    #experiment.log_metric("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
-
-                    print(f"global_step={global_step}, risk_pred_vs_true={risk_pred_vs_true}")
-                    # print(f"global_step={global_step}, ep_Risk_cost_int={ep_risk_cost_int}, cum_Risk_cost_int={cum_risk_cost_int}")
-                    #print(f"global_step={global_step}, episodic_risk={ep_risk}, cum_risks={cum_risk}, cum_costs={cum_cost}")
-
-
-
-                writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
-                writer.add_scalar("charts/episodic_cost", ep_cost, global_step)
-                writer.add_scalar("charts/cummulative_cost", cum_cost, global_step)
-                #print(info["episode"]["l"])
-                # f_ep_len.append(f_ep_len[-1]+info["episode"]["l"][0])
-
-#                wandb.log({"charts/episodic_return":info["episode"]["r"]}, step=global_step)
-
-#experiment.log_metric("charts/episodic_return", info["episode"]["r"], global_step)
-                #experiment.log_metric("charts/episodic_length", info["episode"]["l"], global_step)
-                #experiment.log_metric("charts/episodic_cost", ep_cost, global_step)
-                #experiment.log_metric("charts/cummulative_cost", cum_cost, global_step)
-                last_step = global_step
-                episode += 1
-                step_log = 0
-                
-                f_obs = None    
-                f_next_obs = None
-                f_risks = None
-                f_ep_len = None
-                f_actions = None
-                f_rewards = None
-                f_dones = None
-                f_costs = None
+                ## Save all the data
                 if cfg.collect_data:
-                    make_dirs(storage_path, episode)
+                    torch.save(f_obs, os.path.join(storage_path, "obs.pt"))
+                    torch.save(f_actions, os.path.join(storage_path, "actions.pt"))
+                    torch.save(f_costs, os.path.join(storage_path, "costs.pt"))
+                    torch.save(f_risks, os.path.join(storage_path, "risks.pt"))
+                    torch.save(torch.Tensor(f_ep_len), os.path.join(storage_path, "ep_len.pt"))
+                    #make_dirs(storage_path, episode)
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -694,28 +682,9 @@ def train(cfg):
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-
-
-
-
-
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
-        #experiment.log_metric("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-        #experiment.log_metric("losses/value_loss", v_loss.item(), global_step)
-        #experiment.log_metric("losses/policy_loss", pg_loss.item(), global_step)
-        #experiment.log_metric("losses/entropy", entropy_loss.item(), global_step)
-        #experiment.log_metric("losses/old_approx_kl", old_approx_kl.item(), global_step)
-        #experiment.log_metric("losses/approx_kl", approx_kl.item(), global_step)
-        #experiment.log_metric("losses/clipfrac", np.mean(clipfracs), global_step)
-        #experiment.log_metric("losses/explained_variance", explained_var, global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         #experiment.log_metric("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-    ## Save all the data
-    if cfg.collect_data:
-        torch.save(f_obs, os.path.join(storage_path, "obs.pt"))
-        torch.save(f_actions, os.path.join(storage_path, "actions.pt"))
-        torch.save(f_risks, os.path.join(storage_path, "risks.pt"))
-        torch.save(torch.Tensor(f_ep_len), os.path.join(storage_path, "ep_len.pt"))
+
     print(f_ep_len)
     envs.close()
     writer.close()
@@ -726,3 +695,4 @@ def train(cfg):
 if __name__ == "__main__":
     cfg = parse_args()
     train(cfg)
+
