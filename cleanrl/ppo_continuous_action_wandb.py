@@ -109,6 +109,8 @@ def parse_args():
         help="Use risk model in the critic or not ")
     parser.add_argument("--model-type", type=str, default="mlp",
         help="specify the NN to use for the risk model")
+    parser.add_argument("--risk-type", type=str, default="discrete",
+        help="whether the risk is discrete or continuous")
     parser.add_argument("--fear-radius", type=int, default=5,
         help="fear radius for training the risk model")
     parser.add_argument("--num-risk-datapoints", type=int, default=10000,
@@ -249,6 +251,43 @@ class Agent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
+
+class ContRiskAgent(nn.Module):
+    def __init__(self, envs):
+        super().__init__()
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod()+1, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, 1), std=1.0),
+        )
+        self.actor_mean = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod()+1, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+        )
+        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+
+    def get_value(self, x, risk):
+        x = torch.cat([x, risk], axis=1)
+        return self.critic(x)
+
+    def get_action_and_value(self, x, risk, action=None):
+        x = torch.cat([x, risk], axis=1)
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+
+
+
+
 class RiskDataset(nn.Module):
     def __init__(self, inputs, targets):
         self.inputs = inputs
@@ -340,11 +379,8 @@ def train(cfg):
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    if cfg.model_type == "bayesian":
-        risk_model_class = BayesRiskEst 
-    else:
-        risk_model_class = RiskEst
-    # print(envs.single_observation_space.shape)
+    risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "discrete": BayesRiskEst}, 
+                        "mlp": {"continuous": RiskEst, "discrete": RiskEst}} 
 
     if cfg.fine_tune_risk:
         if cfg.rb_type == "balanced":
@@ -358,9 +394,12 @@ def train(cfg):
             criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([1, 1.]).to(device))
 
     if cfg.use_risk:
-        agent = RiskAgent(envs=envs).to(device)
+        if cfg.risk_type == "discrete":
+            agent = RiskAgent(envs=envs).to(device)
+        else:
+            agent = ContRiskAgent(envs=envs).to(device)
         if os.path.exists(cfg.risk_model_path):
-            risk_model = risk_model_class(obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=True)
+            risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod())
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             risk_model.to(device)
             if cfg.fine_tune_risk:
@@ -382,7 +421,10 @@ def train(cfg):
     dones = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
     values = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
     costs = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
-    risks = torch.zeros((cfg.num_steps, cfg.num_envs) + (2,)).to(device)
+    if cfg.risk_type == "continuous":
+        risks = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+    else:
+        risks = torch.zeros((cfg.num_steps, cfg.num_envs) + (2,)).to(device)
 
     all_costs = torch.zeros((cfg.total_timesteps, cfg.num_envs)).to(device)
     all_risks = torch.zeros((cfg.total_timesteps, cfg.num_envs)).to(device)
@@ -438,8 +480,8 @@ def train(cfg):
             all_costs[global_step] = cost
 
             if cfg.use_risk:
-                next_risk = risk_model(next_obs).detach()
-                if cfg.binary_risk:
+                next_risk = risk_model(next_obs)[0].detach()
+                if cfg.binary_risk and cfg.risk_type == "discrete":
                     id_risk = torch.argmax(next_risk, axis=1)
                     next_risk = torch.zeros_like(next_risk)
                     next_risk[:, id_risk] = 1
@@ -516,14 +558,14 @@ def train(cfg):
                     ep_risk = torch.sum(all_risks[last_step:global_step]).item()
                     cum_risk += ep_risk
 
-                    risk_cost_int = torch.logical_and(f_risks, all_risks[last_step:global_step])
-                    ep_risk_cost_int = torch.sum(risk_cost_int).item()
-                    cum_risk_cost_int += ep_risk_cost_int
+                    #risk_cost_int = torch.logical_and(f_risks, all_risks[last_step:global_step])
+                    #ep_risk_cost_int = torch.sum(risk_cost_int).item()
+                    #cum_risk_cost_int += ep_risk_cost_int
 
                     writer.add_scalar("charts/episodic_risk", ep_risk, global_step)
                     writer.add_scalar("charts/cummulative_risk", cum_risk, global_step)
-                    writer.add_scalar("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
-                    writer.add_scalar("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
+                    #writer.add_scalar("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
+                    #writer.add_scalar("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
 
 
                     #experiment.log_metric("charts/episodic_risk", ep_risk, global_step)
@@ -531,8 +573,8 @@ def train(cfg):
                     #experiment.log_metric("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
                     #experiment.log_metric("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
 
-                    print(f"global_step={global_step}, ep_Risk_cost_int={ep_risk_cost_int}, cum_Risk_cost_int={cum_risk_cost_int}")
-                    print(f"global_step={global_step}, episodic_risk={ep_risk}, cum_risks={cum_risk}, cum_costs={cum_cost}")
+                    #print(f"global_step={global_step}, ep_Risk_cost_int={ep_risk_cost_int}, cum_Risk_cost_int={cum_risk_cost_int}")
+                    #print(f"global_step={global_step}, episodic_risk={ep_risk}, cum_risks={cum_risk}, cum_costs={cum_cost}")
 
 
 
@@ -605,7 +647,10 @@ def train(cfg):
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
-        b_risks = risks.reshape((-1, ) + (2, ))
+        if cfg.risk_type == "discrete":
+            b_risks = risks.reshape((-1, ) + (2, ))
+        else:
+            b_risks = risks.reshape((-1, ) + (1, ))
 
 
         # Optimizing the policy and value network
