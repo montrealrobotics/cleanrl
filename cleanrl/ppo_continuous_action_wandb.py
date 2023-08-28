@@ -394,10 +394,10 @@ def train(cfg):
             criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([1, 1.]).to(device))
 
     if cfg.use_risk:
-        if cfg.risk_type == "discrete":
-            agent = RiskAgent(envs=envs).to(device)
-        else:
-            agent = ContRiskAgent(envs=envs).to(device)
+        #if cfg.risk_type == "discrete":
+        agent = RiskAgent(envs=envs).to(device)
+        #else:
+        #    agent = ContRiskAgent(envs=envs).to(device)
         if os.path.exists(cfg.risk_model_path):
             risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod())
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
@@ -421,13 +421,13 @@ def train(cfg):
     dones = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
     values = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
     costs = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
-    if cfg.risk_type == "continuous":
-        risks = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
-    else:
-        risks = torch.zeros((cfg.num_steps, cfg.num_envs) + (2,)).to(device)
+    #if cfg.risk_type == "continuous":
+    #    risks = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+    #else:
+    risks = torch.zeros((cfg.num_steps, cfg.num_envs) + (2,)).to(device)
 
     all_costs = torch.zeros((cfg.total_timesteps, cfg.num_envs)).to(device)
-    all_risks = torch.zeros((cfg.total_timesteps, cfg.num_envs)).to(device)
+    all_risks = torch.zeros((cfg.total_timesteps, cfg.num_envs, 2)).to(device)
 
 
     # TRY NOT TO MODIFY: start the game
@@ -480,14 +480,16 @@ def train(cfg):
             all_costs[global_step] = cost
 
             if cfg.use_risk:
-                next_risk = risk_model(next_obs)[0].detach()
+                with torch.no_grad():
+                    next_risk = torch.Tensor(risk_model(next_obs)).to(device).unsqueeze(0)
+                #print(next_risk.size())
                 if cfg.binary_risk and cfg.risk_type == "discrete":
                     id_risk = torch.argmax(next_risk, axis=1)
                     next_risk = torch.zeros_like(next_risk)
                     next_risk[:, id_risk] = 1
                 # print(next_risk)
                 risks[step] = next_risk
-                all_risks[global_step] = torch.argmax(next_risk, axis=-1)
+                all_risks[global_step] = next_risk#, axis=-1)
 
 
             # ALGO LOGIC: action logic
@@ -647,10 +649,10 @@ def train(cfg):
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
-        if cfg.risk_type == "discrete":
-            b_risks = risks.reshape((-1, ) + (2, ))
-        else:
-            b_risks = risks.reshape((-1, ) + (1, ))
+        #if cfg.risk_type == "discrete":
+        b_risks = risks.reshape((-1, ) + (2, ))
+        #else:
+        #    b_risks = risks.reshape((-1, ) + (1, ))
 
 
         # Optimizing the policy and value network
