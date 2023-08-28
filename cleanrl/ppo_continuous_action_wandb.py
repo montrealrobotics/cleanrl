@@ -353,13 +353,14 @@ def train(cfg):
     #    project_name="risk-aware-exploration",
     #    workspace="hbutsuak95",
     #)      
-    import wandb 
-    run = wandb.init(config=vars(cfg), entity="kaustubh95",
-                  project="risk_aware_exploration",
-                  monitor_gym=True,
-                  sync_tensorboard=True, save_code=True)
+    # import wandb 
+    # run = wandb.init(config=vars(cfg), entity="kaustubh95",
+    #               project="risk_aware_exploration",
+    #               monitor_gym=True,
+    #               sync_tensorboard=True, save_code=True)
 
-    run_name = run.name
+    run_name = "something"
+    # run_name = run.name
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
@@ -485,6 +486,10 @@ def train(cfg):
                 #print(next_risk.size())
                 if cfg.binary_risk and cfg.risk_type == "discrete":
                     id_risk = torch.argmax(next_risk, axis=1)
+                    next_risk = torch.zeros_like(next_risk)
+                    next_risk[:, id_risk] = 1
+                elif cfg.binary_risk and cfg.risk_type == "continuous":
+                    id_risk = int(next_risk[:,0] >= 1 / (cfg.fear_radius + 1))
                     next_risk = torch.zeros_like(next_risk)
                     next_risk[:, id_risk] = 1
                 # print(next_risk)
