@@ -15,6 +15,7 @@ from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
+from torch.nn.functional import * 
 
 from comet_ml import Experiment
 from stable_baselines3.common.buffers import * 
@@ -113,23 +114,24 @@ def parse_args():
         help="whether the risk is discrete or continuous")
     parser.add_argument("--fear-radius", type=int, default=5,
         help="fear radius for training the risk model")
-    parser.add_argument("--num-risk-datapoints", type=int, default=10000,
+    parser.add_argument("--num-risk-datapoints", type=int, default=1000,
         help="fear radius for training the risk model")
-    parser.add_argument("--update-risk-model", type=int, default=10000,
+    parser.add_argument("--update-risk-model", type=int, default=1000,
         help="number of epochs to update the risk model")
     parser.add_argument("--risk-epochs", type=int, default=10,
         help="number of epochs to update the risk model")
-    parser.add_argument("--risk-lr", type=float, default=1e-5,
+    parser.add_argument("--risk-lr", type=float, default=1e-7,
         help="the learning rate of the optimizer")
     parser.add_argument("--risk-batch-size", type=int, default=10,
         help="number of epochs to update the risk model")
     parser.add_argument("--fine-tune-risk", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
-    parser.add_argument("--start-risk-update", type=int, default=10000,
+    parser.add_argument("--start-risk-update", type=int, default=1000,
         help="number of epochs to update the risk model") 
     parser.add_argument("--rb-type", type=str, default="balanced",
         help="which type of replay buffer to use for ")
-    
+    parser.add_argument("--freeze-risk-layers", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -333,14 +335,17 @@ def fine_tune_risk(cfg, model, inputs, targets, opt, device):
             
             
 def risk_sgd_step(cfg, model, batch, criterion, opt, device):
+        model.train()
         pred = model(batch["next_obs"].to(device))
         if cfg.model_type == "mlp":
-            loss = criterion(pred, batch["risks"].to(device))
+            loss = criterion(pred, one_hot(batch["risks"]).to(device))
         else:
-            loss = criterion(pred, torch.argmax(batch["risks"].squeeze(), axis=1).to(device))
+            loss = criterion(pred, batch["risks"].squeeze().to(torch.int64).to(device))
         opt.zero_grad()
         loss.backward()
         opt.step()
+        model.eval()
+        return loss 
 
 
 def train(cfg):
@@ -404,7 +409,13 @@ def train(cfg):
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             risk_model.to(device)
             if cfg.fine_tune_risk:
-                opt_risk = optim.Adam(risk_model.parameters(), lr=cfg.risk_lr, eps=1e-5)
+                ## Freezing all except last layer of the risk model
+                if cfg.freeze_risk_layers:
+                    for param in risk_model.parameters():
+                        param.requires_grad = False 
+                    risk_model.out.weight.requires_grad = True
+                    risk_model.out.bias.requires_grad = True 
+                opt_risk = optim.Adam(filter(lambda p: p.requires_grad, risk_model.parameters()), lr=cfg.risk_lr, eps=1e-10)
             risk_model.eval()
         else:
             raise("No model in the path specified!!")
@@ -482,7 +493,9 @@ def train(cfg):
 
             if cfg.use_risk:
                 with torch.no_grad():
-                    next_risk = torch.Tensor(risk_model(next_obs)).to(device).unsqueeze(0)
+                    next_risk = torch.Tensor(risk_model(next_obs)).to(device)
+                    if cfg.risk_type == "continuous":
+                        next_risk = next_risk.unsqueeze(0)
                 #print(next_risk.size())
                 if cfg.binary_risk and cfg.risk_type == "discrete":
                     id_risk = torch.argmax(next_risk, axis=1)
@@ -542,8 +555,10 @@ def train(cfg):
             obs_ = next_obs
             # if global_step % cfg.update_risk_model == 0 and cfg.fine_tune_risk:
             if global_step > cfg.start_risk_update and cfg.fine_tune_risk:
+                #print(global_step)
                 batch = rb.sample(cfg.risk_batch_size)
-                risk_sgd_step(cfg, risk_model, batch, criterion, opt_risk, device)
+                risk_loss = risk_sgd_step(cfg, risk_model, batch, criterion, opt_risk, device)
+                writer.add_scalar("risk/risk_loss", risk_loss, global_step)                
                 # fine_tune_risk(cfg, risk_model, f_obs[-cfg.num_risk_datapoints:], f_risks[-cfg.num_risk_datapoints:], opt_risk, device)
 
 
@@ -569,8 +584,8 @@ def train(cfg):
                     #ep_risk_cost_int = torch.sum(risk_cost_int).item()
                     #cum_risk_cost_int += ep_risk_cost_int
 
-                    writer.add_scalar("charts/episodic_risk", ep_risk, global_step)
-                    writer.add_scalar("charts/cummulative_risk", cum_risk, global_step)
+                    writer.add_scalar("risk/episodic_risk", ep_risk, global_step)
+                    writer.add_scalar("risk/cummulative_risk", cum_risk, global_step)
                     #writer.add_scalar("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
                     #writer.add_scalar("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
 
@@ -585,10 +600,10 @@ def train(cfg):
 
 
 
-                writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
-                writer.add_scalar("charts/episodic_cost", ep_cost, global_step)
-                writer.add_scalar("charts/cummulative_cost", cum_cost, global_step)
+                writer.add_scalar("Performance/episodic_return", info["episode"]["r"], global_step)
+                writer.add_scalar("Performance/episodic_length", info["episode"]["l"], global_step)
+                writer.add_scalar("Performance/episodic_cost", ep_cost, global_step)
+                writer.add_scalar("Performance/cummulative_cost", cum_cost, global_step)
                 last_step = global_step
                 episode += 1
                 step_log = 0
@@ -597,10 +612,13 @@ def train(cfg):
                 # f_dist_to_fail = torch.Tensor(np.array(list(reversed(range(f_obs.size()[0]))))).to(device) if cost > 0 else torch.Tensor(np.array([f_obs.size()[0]]*f_obs.shape[0])).to(device)
                 e_risks = torch.Tensor(np.array(list(reversed(range(int(info["episode"]["l"])))))).to(device) if cost > 0 else torch.Tensor(np.array([int(info["episode"]["l"])]*int(info["episode"]["l"]))).to(device)
                 # print(risks.size())
+                
                 if cfg.fine_tune_risk or cfg.collect_data:
                     f_risks = e_risks.unsqueeze(1) if f_risks is None else torch.cat([f_risks, e_risks.unsqueeze(1)], axis=0)
+                    f_risks_discrete = torch.zeros_like(f_risks)
+                    f_risks_discrete[-cfg.fear_radius:] = 1 
                 if cfg.fine_tune_risk:
-
+                    f_dist_to_fail = e_risks
                     if cfg.rb_type == "balanced":
                         idx_risky = (f_dist_to_fail<=cfg.fear_radius)
                         idx_safe = (f_dist_to_fail>cfg.fear_radius)
@@ -608,12 +626,12 @@ def train(cfg):
                         rb.add_risky(f_obs[idx_risky], f_next_obs[idx_risky], f_actions[idx_risky], f_rewards[idx_risky], f_dones[idx_risky], f_costs[idx_risky], f_risks[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
                         rb.add_safe(f_obs[idx_safe], f_next_obs[idx_safe], f_actions[idx_safe], f_rewards[idx_safe], f_dones[idx_safe], f_costs[idx_safe], f_risks[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
                     else:
-                        rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks, f_dist_to_fail.unsqueeze(1))
+                        rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks_discrete, e_risks.unsqueeze(1))
 
                     f_obs = None    
                     f_next_obs = None
                     f_risks = None
-                    f_ep_len = None
+                    #f_ep_len = None
                     f_actions = None
                     f_rewards = None
                     f_dones = None
