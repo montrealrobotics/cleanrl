@@ -35,6 +35,8 @@ def parse_args():
         help="the name of this experiment")
     parser.add_argument("--seed", type=int, default=1,
         help="seed of the experiment")
+    parser.add_argument("--model-seed", type=int, default=1,
+        help="seed for the torch initialization")
     parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if toggled, `torch.backends.cudnn.deterministic=False`")
     parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
@@ -126,7 +128,7 @@ def parse_args():
         help="number of epochs to update the risk model")
     parser.add_argument("--fine-tune-risk", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
-    parser.add_argument("--start-risk-update", type=int, default=1000,
+    parser.add_argument("--start-risk-update", type=int, default=10000,
         help="number of epochs to update the risk model") 
     parser.add_argument("--rb-type", type=str, default="balanced",
         help="which type of replay buffer to use for ")
@@ -358,14 +360,14 @@ def train(cfg):
     #    project_name="risk-aware-exploration",
     #    workspace="hbutsuak95",
     #)      
-    # import wandb 
-    # run = wandb.init(config=vars(cfg), entity="kaustubh95",
-    #               project="risk_aware_exploration",
-    #               monitor_gym=True,
-    #               sync_tensorboard=True, save_code=True)
+    import wandb 
+    run = wandb.init(config=vars(cfg), entity="kaustubh95",
+                   project="risk_aware_exploration",
+                   monitor_gym=True,
+                   sync_tensorboard=True, save_code=True)
 
-    run_name = "something"
-    # run_name = run.name
+    #run_name = "something"
+    run_name = run.name
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
@@ -374,7 +376,7 @@ def train(cfg):
 
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
-    torch.manual_seed(cfg.seed)
+    torch.manual_seed(cfg.model_seed)
     torch.backends.cudnn.deterministic = cfg.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and cfg.cuda else "cpu")
@@ -554,7 +556,7 @@ def train(cfg):
 
             obs_ = next_obs
             # if global_step % cfg.update_risk_model == 0 and cfg.fine_tune_risk:
-            if global_step > cfg.start_risk_update and cfg.fine_tune_risk:
+            if cfg.use_risk and (global_step > cfg.start_risk_update and cfg.fine_tune_risk):
                 #print(global_step)
                 batch = rb.sample(cfg.risk_batch_size)
                 risk_loss = risk_sgd_step(cfg, risk_model, batch, criterion, opt_risk, device)
