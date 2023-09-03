@@ -106,7 +106,7 @@ def parse_args():
         help="Use risk model in the actor or not ")
     parser.add_argument("--risk-critic", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Use risk model in the critic or not ")
-    parser.add_argument("--risk-model-path", type=str, default="./pretrained/agent.pt",
+    parser.add_argument("--risk-model-path", type=str, default="None",
         help="the id of the environment")
     parser.add_argument("--binary-risk", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Use risk model in the critic or not ")
@@ -361,7 +361,9 @@ def train(cfg):
     #    api_key="FlhfmY238jUlHpcRzzuIw3j2t",
     #    project_name="risk-aware-exploration",
     #    workspace="hbutsuak95",
-    #)      
+    #) 
+    cfg.use_risk = False if cfg.risk_model_path == "None" else True 
+
     import wandb 
     run = wandb.init(config=vars(cfg), entity="kaustubh95",
                    project="risk_aware_exploration",
@@ -406,6 +408,7 @@ def train(cfg):
             criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([1, 1.]).to(device))
 
     if cfg.use_risk:
+        print("using risk")
         #if cfg.risk_type == "discrete":
         agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
         #else:
