@@ -134,6 +134,8 @@ def parse_args():
         help="which type of replay buffer to use for ")
     parser.add_argument("--freeze-risk-layers", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
+    parser.add_argument("--quantile-size", type=int, default=4, help="size of the risk quantile ")
+    parser.add_argument("--quantile-num", type=int, default=5, help="number of quantiles to make")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -173,7 +175,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class RiskAgent(nn.Module):
-    def __init__(self, envs, risk_actor=True, risk_critic=False):
+    def __init__(self, envs, risk_size=2, risk_actor=True, risk_critic=False):
         super().__init__()
         ## Actor
         self.actor_fc1 = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64))
@@ -188,11 +190,11 @@ class RiskAgent(nn.Module):
         self.tanh = nn.Tanh()
 
         self.risk_encoder_actor = nn.Sequential(
-            layer_init(nn.Linear(2, 12)),
+            layer_init(nn.Linear(risk_size, 12)),
             nn.Tanh())
 
         self.risk_encoder_critic = nn.Sequential(
-            layer_init(nn.Linear(2, 12)),
+            layer_init(nn.Linear(risk_size, 12)),
             nn.Tanh())
 
 
@@ -225,7 +227,7 @@ class RiskAgent(nn.Module):
 
 
 class Agent(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, envs, risk_size=None):
         super().__init__()
         self.critic = nn.Sequential(
             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
@@ -257,7 +259,7 @@ class Agent(nn.Module):
 
 
 class ContRiskAgent(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, envs, risk_size=1):
         super().__init__()
         self.critic = nn.Sequential(
             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod()+1, 64)),
@@ -387,9 +389,11 @@ def train(cfg):
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "discrete": BayesRiskEst}, 
+    risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "discrete": BayesRiskEst, "quantile": BayesRiskEst}, 
                         "mlp": {"continuous": RiskEst, "discrete": RiskEst}} 
 
+    risk_size_dict = {"continuous": 1, "discrete": 2, "quantile": cfg.quantile_num}
+    risk_size = risk_size_dict[cfg.risk_type]
     if cfg.fine_tune_risk:
         if cfg.rb_type == "balanced":
             rb = ReplayBufferBalanced(buffer_size=cfg.total_timesteps)
@@ -403,13 +407,14 @@ def train(cfg):
 
     if cfg.use_risk:
         #if cfg.risk_type == "discrete":
-        agent = RiskAgent(envs=envs).to(device)
+        agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
         #else:
         #    agent = ContRiskAgent(envs=envs).to(device)
         if os.path.exists(cfg.risk_model_path):
-            risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod())
+            risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=False, out_size=risk_size)
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             risk_model.to(device)
+            print("risk model loaded successfully")
             if cfg.fine_tune_risk:
                 ## Freezing all except last layer of the risk model
                 if cfg.freeze_risk_layers:
@@ -438,10 +443,10 @@ def train(cfg):
     #if cfg.risk_type == "continuous":
     #    risks = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
     #else:
-    risks = torch.zeros((cfg.num_steps, cfg.num_envs) + (2,)).to(device)
+    risks = torch.zeros((cfg.num_steps, cfg.num_envs) + (risk_size,)).to(device)
 
     all_costs = torch.zeros((cfg.total_timesteps, cfg.num_envs)).to(device)
-    all_risks = torch.zeros((cfg.total_timesteps, cfg.num_envs, 2)).to(device)
+    all_risks = torch.zeros((cfg.total_timesteps, cfg.num_envs, risk_size)).to(device)
 
 
     # TRY NOT TO MODIFY: start the game
@@ -675,7 +680,7 @@ def train(cfg):
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
         #if cfg.risk_type == "discrete":
-        b_risks = risks.reshape((-1, ) + (2, ))
+        b_risks = risks.reshape((-1, ) + (risk_size, ))
         #else:
         #    b_risks = risks.reshape((-1, ) + (1, ))
 
