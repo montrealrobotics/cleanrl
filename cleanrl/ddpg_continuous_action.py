@@ -72,18 +72,42 @@ def parse_args():
         help="noise clip parameter of the Target Policy Smoothing Regularization")
     
     ## Arguments related to risk model 
-    parser.add_argument("--use-risk", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+    parser.add_argument("--use-risk", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Use risk model or not ")
     parser.add_argument("--risk-actor", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Use risk model in the actor or not ")
     parser.add_argument("--risk-critic", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Use risk model in the critic or not ")
-    parser.add_argument("--risk-model-path", type=str, default="./pretrained/no_termination/risk_ancient_sweep_4.pt",
+    parser.add_argument("--risk-model-path", type=str, default="None",
         help="the id of the environment")
     parser.add_argument("--binary-risk", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
-        help="Use risk model in the critic or not ")  
+        help="Use risk model in the critic or not ")
     parser.add_argument("--model-type", type=str, default="mlp",
         help="specify the NN to use for the risk model")
+    parser.add_argument("--risk-type", type=str, default="discrete",
+        help="whether the risk is discrete or continuous")
+    parser.add_argument("--fear-radius", type=int, default=5,
+        help="fear radius for training the risk model")
+    parser.add_argument("--num-risk-datapoints", type=int, default=1000,
+        help="fear radius for training the risk model")
+    parser.add_argument("--update-risk-model", type=int, default=1000,
+        help="number of epochs to update the risk model")
+    parser.add_argument("--risk-epochs", type=int, default=10,
+        help="number of epochs to update the risk model")
+    parser.add_argument("--risk-lr", type=float, default=1e-7,
+        help="the learning rate of the optimizer")
+    parser.add_argument("--risk-batch-size", type=int, default=10,
+        help="number of epochs to update the risk model")
+    parser.add_argument("--fine-tune-risk", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
+    parser.add_argument("--start-risk-update", type=int, default=10000,
+        help="number of epochs to update the risk model") 
+    parser.add_argument("--rb-type", type=str, default="balanced",
+        help="which type of replay buffer to use for ")
+    parser.add_argument("--freeze-risk-layers", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
+    parser.add_argument("--quantile-size", type=int, default=4, help="size of the risk quantile ")
+    parser.add_argument("--quantile-num", type=int, default=5, help="number of quantiles to make")
  
     args = parser.parse_args()
     # fmt: on
@@ -114,9 +138,11 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, env, use_risk=False):
+    def __init__(self, env, use_risk=False, risk_size=2):
         super().__init__()
         self.use_risk = use_risk
+        self.risk_size = risk_size
+        print(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape))
         self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
         if self.use_risk:
             self.fc2 = nn.Linear(268, 256)
@@ -128,7 +154,7 @@ class QNetwork(nn.Module):
 
         if self.use_risk:
             self.risk_encoder = nn.Sequential(
-                layer_init(nn.Linear(2, 12)),
+                layer_init(nn.Linear(risk_size, 12)),
                 nn.Tanh())
             
 
@@ -146,7 +172,7 @@ class QNetwork(nn.Module):
 
 
 class Actor(nn.Module):
-    def __init__(self, env, use_risk=False):
+    def __init__(self, env, use_risk=False, risk_size=2):
         super().__init__()
         self.use_risk = use_risk
         self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
@@ -165,7 +191,7 @@ class Actor(nn.Module):
         )
         if self.use_risk:
             self.risk_encoder = nn.Sequential(
-                layer_init(nn.Linear(2, 12)),
+                layer_init(nn.Linear(risk_size, 12)),
                 nn.Tanh())
 
     def forward(self, x, risk=None):
@@ -187,7 +213,6 @@ class Actor(nn.Module):
 
 if __name__ == "__main__":
     import stable_baselines3 as sb3
-
     if sb3.__version__ < "2.0":
         raise ValueError(
             """Ongoing migration: run the following command to install the new dependencies:
@@ -197,6 +222,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         )
     args = parse_args()
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    args.use_risk = False if args.risk_model_path == "None" else True 
+
     if args.track:
         import wandb
 
@@ -227,20 +254,22 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     envs = gym.vector.SyncVectorEnv([make_env(args, args.seed, 0, args.capture_video, run_name)])
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    if args.model_type == "bayesian":
-        risk_model_class = BayesRiskEst 
-    else:
-        risk_model_class = RiskEst
+
+    risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
+                        "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
+
+    risk_size_dict = {"continuous": 1, "binary": 2, "quantile": args.quantile_num}
+    risk_size = risk_size_dict[args.risk_type]
 
     print(envs.single_observation_space.shape)
     if args.use_risk:
+        risk_model = risk_model_class[args.model_type][args.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=True, out_size=risk_size)
         if os.path.exists(args.risk_model_path):
-            risk_model = risk_model_class(obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=True)
             risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
-            risk_model.to(device)
-            risk_model.eval()
         else:
-            raise("No model in the path specified!!")
+            print("No risk model in the path specified... randomly initializing risk model")
+        risk_model.to(device)
+        risk_model.eval()
         
     
         
@@ -264,7 +293,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     start_time = time.time()
     cum_cost, ep_cost, ep_risk_cost_int, cum_risk_cost_int, ep_risk, cum_risk = 0, 0, 0, 0, 0, 0
 
-    all_costs = torch.zeros((args.total_timesteps, args.num_envs)).to(device)
+    all_costs = torch.zeros((args.total_timesteps, args.num_envs, risk_size)).to(device)
     all_risks = torch.zeros((args.total_timesteps, args.num_envs)).to(device)
 
     # TRY NOT TO MODIFY: start the game
@@ -291,14 +320,25 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         all_costs[global_step] = cost
         if risk is not None:
-            all_risks[global_step] = risk
+            all_risks[global_step] = torch.argmax(risk, axis=1)
 
         if not done:
-            cost = torch.Tensor(infos["cost"]).to(device).view(-1)
+            cost = infos["cost"]
         else:
-            cost = torch.Tensor(np.array([infos["final_info"][0]["cost"]])).to(device).view(-1)
+            cost = np.array([infos["final_info"][0]["cost"]])
 
         infos["risk"] = risk
+        # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
+        real_next_obs = next_obs.copy()
+        for idx, d in enumerate(truncateds):
+            if d:
+                real_next_obs[idx] = infos["final_observation"][idx]
+        rb.add(obs, real_next_obs, actions, rewards, terminateds, cost, infos)
+
+        cost = torch.Tensor(cost).to(device).view(-1)
+
+        # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
+        obs = next_obs
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
 
@@ -308,9 +348,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                     ep_cost = 1.
                 #ep_cost = torch.sum(all_costs[last_step:global_step]).item()
                 cum_cost += ep_cost
-
+                
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episodic_cost={ep_cost}")
-
+                e_risks = np.array(list(reversed(range(int(info["episode"]["l"]))))) if cost > 0 else np.array([int(info["episode"]["l"])]*int(info["episode"]["l"]))
+                rb.add_risks(np.expand_dims(e_risks, 1))
+                e_risks = torch.Tensor(e_risks).to(device)
                 if args.use_risk:
                     ep_risk = torch.sum(all_risks[last_step:global_step]).item()
                     cum_risk += ep_risk
@@ -342,15 +384,15 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 # writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 break
 
-        # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
-        real_next_obs = next_obs.copy()
-        for idx, d in enumerate(truncateds):
-            if d:
-                real_next_obs[idx] = infos["final_observation"][idx]
-        rb.add(obs, real_next_obs, actions, rewards, terminateds, infos)
+        # # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
+        # real_next_obs = next_obs.copy()
+        # for idx, d in enumerate(truncateds):
+        #     if d:
+        #         real_next_obs[idx] = infos["final_observation"][idx]
+        # rb.add(obs, real_next_obs, actions, rewards, terminateds, infos)
 
-        # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
-        obs = next_obs
+        # # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
+        # obs = next_obs
 
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
@@ -369,7 +411,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 else:
                     risks = None
             
-            qf1_a_values = qf1(data.observations, data.actions, risks).view(-1)
+            qf1_a_values = qf1(data.observations.float(), data.actions.float(), risks.float()).view(-1)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
 
             # optimize the model
