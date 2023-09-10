@@ -413,8 +413,10 @@ def train(cfg):
         agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
         #else:
         #    agent = ContRiskAgent(envs=envs).to(device)
+        risk_obs_size = 72 if "goal" in cfg.risk_model_path.lower() else 88 
+        print(risk_obs_size)
         if os.path.exists(cfg.risk_model_path):
-            risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=False, out_size=risk_size)
+            risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=risk_obs_size, batch_norm=True, out_size=risk_size)
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             risk_model.to(device)
             print("risk model loaded successfully")
@@ -480,7 +482,7 @@ def train(cfg):
     # risk_ = torch.Tensor([[1., 0.]]).to(device)
     # print(f_obs.size(), f_risks.size())
     all_data = None
-
+    print(next_obs.size())
     if cfg.collect_data:
         #os.system("rm -rf %s"%cfg.storage_path)
         storage_path = os.path.join(cfg.storage_path, cfg.env_id, run.name)
@@ -503,7 +505,16 @@ def train(cfg):
 
             if cfg.use_risk:
                 with torch.no_grad():
-                    next_risk = torch.Tensor(risk_model(next_obs)).to(device)
+                    if "goal" in cfg.risk_model_path.lower():
+                        if "push" in cfg.env_id.lower():
+                            #print("push")
+                            next_obs_risk = next_obs[:, :-16]
+                        elif "button" in cfg.env_id.lower():
+                            #print("button")
+                            next_obs_risk = next_obs[:, list(range(40)) + list(range(56, 88))]
+                        else:
+                            next_obs_risk = next_obs 
+                    next_risk = torch.Tensor(risk_model(next_obs_risk)).to(device)
                     if cfg.risk_type == "continuous":
                         next_risk = next_risk.unsqueeze(0)
                 #print(next_risk.size())
