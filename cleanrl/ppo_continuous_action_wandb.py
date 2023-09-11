@@ -383,7 +383,7 @@ def train(cfg):
     torch.manual_seed(cfg.model_seed)
     torch.backends.cudnn.deterministic = cfg.torch_deterministic
 
-    device = torch.device("cuda" if torch.cuda.is_available() and cfg.cuda else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 and cfg.cuda else "cpu")
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
@@ -513,7 +513,17 @@ def train(cfg):
                             #print("button")
                             next_obs_risk = next_obs[:, list(range(40)) + list(range(56, 88))]
                         else:
-                            next_obs_risk = next_obs 
+                            next_obs_risk = next_obs
+                    elif "button" in cfg.risk_model_path.lower():
+                        if "push" in cfg.env_id.lower():
+                            #print("push")
+                            next_obs_risk = next_obs[:, list(range(40)) + list(range(72, 88)) + list(range(40, 72))]
+                        elif "goal" in cfg.env_id.lower():
+                            #print("button")
+                            next_obs_risk = next_obs[:, list(range(40)) + list(range(56, 88))]
+                        else:
+                            next_obs_risk = next_obs
+
                     next_risk = torch.Tensor(risk_model(next_obs_risk)).to(device)
                     if cfg.risk_type == "continuous":
                         next_risk = next_risk.unsqueeze(0)
