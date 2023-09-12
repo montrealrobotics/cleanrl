@@ -113,6 +113,8 @@ def parse_args():
         help="Use risk model in the critic or not ")
     parser.add_argument("--model-type", type=str, default="mlp",
         help="specify the NN to use for the risk model")
+    parser.add_argument("--risk-bnorm", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--risk-type", type=str, default="binary",
         help="whether the risk is binary or continuous")
     parser.add_argument("--fear-radius", type=int, default=5,
@@ -446,7 +448,7 @@ def train(cfg):
         agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
         #else:
         #    agent = ContRiskAgent(envs=envs).to(device)
-        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=False, out_size=risk_size)
+        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=True, out_size=risk_size)
         if os.path.exists(cfg.risk_model_path):
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
         risk_model.to(device)
