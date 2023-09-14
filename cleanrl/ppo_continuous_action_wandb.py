@@ -131,6 +131,8 @@ def parse_args():
         help="number of epochs to update the risk model")
     parser.add_argument("--fine-tune-risk", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
+    parser.add_argument("--finetune-risk-online", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--start-risk-update", type=int, default=10000,
         help="number of epochs to update the risk model") 
     parser.add_argument("--rb-type", type=str, default="balanced",
@@ -379,7 +381,38 @@ def train_risk(cfg, model, data, criterion, opt, device):
     return net_loss
 
 
-        
+
+def get_risk_obs(cfg, next_obs):
+    if "goal" in cfg.risk_model_path.lower():
+        if "push" in cfg.env_id.lower():
+            #print("push")
+            next_obs_risk = next_obs[:, :-16]
+        elif "button" in cfg.env_id.lower():
+            #print("button")
+            next_obs_risk = next_obs[:, list(range(24)) + list(range(40, 88))]
+        else:
+            next_obs_risk = next_obs
+    elif "button" in cfg.risk_model_path.lower():
+        if "push" in cfg.env_id.lower():
+            #print("push")
+            next_obs_risk = next_obs[:, list(range(24)) + list(range(72, 88)) + list(range(24, 72))]
+        elif "goal" in cfg.env_id.lower():
+            #print("button")
+            next_obs_risk = next_obs[:, list(range(24)) + list(24, 40) + list(range(24, 72))]
+        else:
+            next_obs_risk = next_obs
+    elif "push" in cfg.risk_model_path.lower():
+        if "button" in cfg.env_id.lower():
+            #print("push")
+            next_obs_risk = next_obs[:, list(range(24)) + list(range(72, 88)) + list(range(24, 72))]
+        elif "goal" in cfg.env_id.lower():
+            #print("button")
+            next_obs_risk = next_obs[:, :-16]
+        else:
+            next_obs_risk = next_obs
+    else:
+        next_obs_risk = next_obs
+    return next_obs_risk        
 
 
 def train(cfg):
@@ -451,8 +484,9 @@ def train(cfg):
         risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=True, out_size=risk_size)
         if os.path.exists(cfg.risk_model_path):
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
+            print("Pretrained risk model loaded successfully")
+
         risk_model.to(device)
-        #print("risk model loaded successfully")
         if cfg.fine_tune_risk:
             # print("Fine Tuning risk")
             ## Freezing all except last layer of the risk model
@@ -539,7 +573,8 @@ def train(cfg):
 
             if cfg.use_risk:
                 with torch.no_grad():
-                    next_risk = torch.Tensor(risk_model(next_obs.to(device))).to(device)
+                    next_obs_risk = get_risk_obs(cfg, next_obs)
+                    next_risk = torch.Tensor(risk_model(next_obs_risk.to(device))).to(device)
                     if cfg.risk_type == "continuous":
                         next_risk = next_risk.unsqueeze(0)
                 #print(next_risk.size())
@@ -604,7 +639,11 @@ def train(cfg):
                 #print(global_step)
                 # update_risk = 0
                 # while update_risk < cfg.num_update_risk:
-                data = rb.sample(cfg.risk_batch_size*cfg.num_update_risk)
+                if cfg.finetune_risk_online:
+                    print("I am online")
+                    data = rb.slice_data(-cfg.risk_batch_size*cfg.num_update_risk, 0)
+                else:
+                    data = rb.sample(cfg.risk_batch_size*cfg.num_update_risk)
                 risk_loss = train_risk(cfg, risk_model, data, criterion, opt_risk, device)
                 writer.add_scalar("risk/risk_loss", risk_loss, global_step)
                     # update_risk += 1                
