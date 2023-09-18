@@ -721,7 +721,7 @@ def train(cfg):
                         rb.add_risky(f_obs[idx_risky], f_next_obs[idx_risky], f_actions[idx_risky], f_rewards[idx_risky], f_dones[idx_risky], f_costs[idx_risky], f_risks[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
                         rb.add_safe(f_obs[idx_safe], f_next_obs[idx_safe], f_actions[idx_safe], f_rewards[idx_safe], f_dones[idx_safe], f_costs[idx_safe], f_risks[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
                     else:
-                        rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks_discrete, e_risks.unsqueeze(1))
+                        rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks, e_risks.unsqueeze(1))
 
                     f_obs = None    
                     f_next_obs = None
