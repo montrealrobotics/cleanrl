@@ -446,7 +446,7 @@ def train(cfg):
     torch.manual_seed(cfg.model_seed)
     torch.backends.cudnn.deterministic = cfg.torch_deterministic
 
-    device = torch.device("cuda" if torch.cuda.is_available() and cfg.cuda else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 and cfg.cuda else "cpu")
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
