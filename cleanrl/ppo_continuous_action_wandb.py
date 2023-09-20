@@ -131,7 +131,7 @@ def parse_args():
         help="number of epochs to update the risk model")
     parser.add_argument("--fine-tune-risk", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
-    parser.add_argument("--finetune-risk-online", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+    parser.add_argument("--finetune-risk-online", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--start-risk-update", type=int, default=10000,
         help="number of epochs to update the risk model") 
@@ -381,26 +381,35 @@ def train_risk(cfg, model, data, criterion, opt, device):
     return net_loss
 
 def test_policy(cfg, agent, envs, device, risk_model=None):
+    envs = gym.vector.SyncVectorEnv(
+        [make_env(cfg, i, cfg.capture_video, "f", cfg.gamma) for i in range(20)]
+    )
     next_obs, _ = envs.reset()
-    total_reward = 0
+    total_reward = np.array([0.]*20)
     risk = None
     step = 0
-    while True:
-        step+= 1
-        next_obs = torch.from_numpy(next_obs).to(device)
+    avg_reward = []
+    while step < 10000:
+        step+= 20
+        next_obs = torch.Tensor(next_obs).to(device)
+        #print(next_obs.size())
         with torch.no_grad():
             if cfg.use_risk:
                 #next_obs = torch.from_numpy(next_obs).to(device)
-                risk = risk_model(get_risk_obs(cfg, next_obs).to(device))
+                next_risk = risk_model(get_risk_obs(cfg, next_obs))
                 action, logprob, _, value = agent.get_action_and_value(next_obs, next_risk)
             else:
                 action, logprob, _, value = agent.get_action_and_value(next_obs)
         next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
         done = np.logical_or(terminated, truncated)
         total_reward += reward
-        if done:
-            break
-    return total_reward 
+        for i in range(20):
+            if done[i]:
+                avg_reward.append(total_reward[i])
+                total_reward[i] = 0 
+    #print(total_reward)
+    #print(avg_reward)
+    return avg_reward 
             
             
 def get_risk_obs(cfg, next_obs):
@@ -575,6 +584,7 @@ def train(cfg):
     f_dones = None
     f_costs = None
 
+    scores = []
     # risk_ = torch.Tensor([[1., 0.]]).to(device)
     # print(f_obs.size(), f_risks.size())
     all_data = None
@@ -690,11 +700,13 @@ def train(cfg):
                 ep_cost = torch.sum(all_costs[last_step:global_step]).item()
                 cum_cost += ep_cost
 
-                print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
-
-
-                avg_total_reward = np.mean([test_policy(cfg, agent, envs, device=device, risk_model=risk) for i in range(20)])
-                writer.add_scalar("Results/Test_Avg_Total_Reward", avg_total_reward, global_step)
+                #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
+                scores.append(info['episode']['r'])
+                
+                #avg_total_reward = np.mean(test_policy(cfg, agent, envs, device=device, risk_model=risk_model))
+                avg_mean_score = np.mean(scores[-100:])
+                writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
+                print(f"global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
                 if cfg.use_risk:
                     ep_risk = torch.sum(all_risks[last_step:global_step]).item()
                     cum_risk += ep_risk
