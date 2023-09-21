@@ -366,7 +366,7 @@ def train_risk(cfg, model, data, criterion, opt, device):
     dataloader = DataLoader(dataset, batch_size=cfg.risk_batch_size, shuffle=True, num_workers=10, generator=torch.Generator(device='cpu'))
     net_loss = 0
     for batch in dataloader:
-        pred = model(batch[0].to(device))
+        pred = model(get_risk_obs(cfg, batch[0]).to(device))
         if cfg.model_type == "mlp":
             loss = criterion(pred, batch[1].squeeze().to(device))
         else:
