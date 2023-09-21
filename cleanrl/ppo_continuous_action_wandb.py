@@ -428,7 +428,7 @@ def get_risk_obs(cfg, next_obs):
             next_obs_risk = next_obs[:, list(range(24)) + list(range(72, 88)) + list(range(24, 72))]
         elif "goal" in cfg.env_id.lower():
             #print("button")
-            next_obs_risk = next_obs[:, list(range(24)) + list(24, 40) + list(range(24, 72))]
+            next_obs_risk = next_obs[:, list(range(24)) + list(range(24, 40)) + list(range(24, 72))]
         else:
             next_obs_risk = next_obs
     elif "push" in cfg.risk_model_path.lower():
