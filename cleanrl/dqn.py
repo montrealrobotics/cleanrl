@@ -158,7 +158,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             config=vars(args),
             name=run_name,
             monitor_gym=True,
-            save_code=True,
+            save_code=True
         )
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
@@ -195,8 +195,26 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     )
     start_time = time.time()
 
+
+    ## Finetuning data collection 
+    f_obs = None
+    f_next_obs = None
+    f_risks = None
+    f_ep_len = [0]
+    f_actions = None
+    f_rewards = None
+    f_dones = None
+    f_costs = None
+
+    scores = []
+    if args.collect_data:
+        #os.system("rm -rf %s"%args.storage_path)
+        storage_path = os.path.join(args.storage_path, args.env_id, run.name)
+        make_dirs(storage_path, episode)
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
+    cum_cost, ep_cost, ep_risk_cost_int, cum_risk_cost_int, ep_risk, cum_risk = 0, 0, 0, 0, 0, 0
+
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
@@ -208,6 +226,30 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminated, truncated, infos = envs.step(map(action_map_fn, actions))
+        # info_dict = {'reward': rewards, 'done': done, 'cost': cost, 'obs': obs} 
+        # if args.collect_data:
+        #     store_data(next_obs, info_dict, storage_path, episode, step_log)
+
+
+        step_log += 1
+        if not done:
+            cost = torch.Tensor(infos["cost"]).to(device).view(-1)
+            ep_cost += infos["cost"]; cum_cost += infos["cost"]
+        else:
+            cost = torch.Tensor(np.array([infos["final_info"][0]["cost"]])).to(device).view(-1)
+            ep_cost += np.array([infos["final_info"][0]["cost"]]); cum_cost += np.array([infos["final_info"][0]["cost"]])
+
+
+
+        if args.fine_tune_risk or args.collect_data:
+            f_obs = torch.Tensor(obs) if f_obs is None else torch.concat([f_obs, torch.Tensor(obs)], axis=0)
+            f_next_obs = torch.Tensor(next_obs) if f_next_obs is None else torch.concat([f_next_obs, torch.Tensor(next_obs)], axis=0)
+            f_actions = torch.Tensor(action) if f_actions is None else torch.concat([f_actions, torch.Tensor(action)], axis=0)
+            f_rewards = torch.Tensor(reward) if f_rewards is None else torch.concat([f_rewards, torch.Tensor(reward)], axis=0)
+            # f_risks = risk_ if f_risks is None else torch.concat([f_risks, risk_], axis=0)
+            f_costs = torch.Tensor(cost) if f_costs is None else torch.concat([f_costs, torch.Tensor(cost)], axis=0)
+            # f_dones = torch.Tensor(next_done) if f_dones is None else torch.concat([f_dones, torch.Tensor(next_done)], axis=0)
+
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
@@ -215,10 +257,30 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 # Skip the envs that are not done
                 if "episode" not in info:
                     continue
+
+                ep_cost = torch.sum(all_costs[last_step:global_step]).item()
+                cum_cost += ep_cost
+
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 writer.add_scalar("charts/epsilon", epsilon, global_step)
+
+                #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
+                scores.append(info['episode']['r'])
+                
+                #avg_total_reward = np.mean(test_policy(args, agent, envs, device=device, risk_model=risk_model))
+                avg_mean_score = np.mean(scores[-100:])
+                writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
+                ## Save all the data
+                if args.collect_data:
+                    f_risks = torch.Tensor(np.array(list(reversed(range(int(info["episode"]["l"])))))).to(device) if cost > 0 else torch.Tensor(np.array([int(info["episode"]["l"])]*int(info["episode"]["l"]))).to(device)
+                    torch.save(f_obs, os.path.join(storage_path, "obs.pt"))
+                    torch.save(f_actions, os.path.join(storage_path, "actions.pt"))
+                    torch.save(f_costs, os.path.join(storage_path, "costs.pt"))
+                    torch.save(f_risks, os.path.join(storage_path, "risks.pt"))
+                    # torch.save(torch.Tensor(f_ep_len), os.path.join(storage_path, "ep_len.pt"))
+                    #make_dirs(storage_path, episode)
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
