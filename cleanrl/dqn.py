@@ -140,7 +140,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         )
     args = parse_args()
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-    action_map = {0: np.array([args.action_scale, args.action_scale]), 1: np.array([0., args.action_scale]), 2: np.array([args.action_scale, 0.])}
+    action_map = {0: np.array([args.action_scale, args.action_scale]), 1: np.array([-args.action_scale, args.action_scale]), 2: np.array([args.action_scale, -args.action_scale]), 3: np.array([-args.action_scale, -args.action_scale])}
     def action_map_fn(action):
         return action_map[action]
 
