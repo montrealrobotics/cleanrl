@@ -418,6 +418,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 if "episode" not in info:
                     continue
 
+
+                ep_cost = 0
                 last_step = global_step
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
