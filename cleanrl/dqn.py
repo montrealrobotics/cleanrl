@@ -434,7 +434,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
                 ## Save all the data
                 e_risks = torch.Tensor(np.array(list(reversed(range(int(info["episode"]["l"])))))).to(device) if cost > 0 else torch.Tensor(np.array([int(info["episode"]["l"])]*int(info["episode"]["l"]))).to(device)
-                if args.fine_tune_risk:
+                if args.fine_tune_risk and args.use_risk:
                     f_risks = e_risks
                     f_dist_to_fail = f_risks
                     f_dones = torch.Tensor(np.array([0]*(f_risks.size()[0])))
