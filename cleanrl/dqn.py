@@ -419,7 +419,6 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                     continue
 
 
-                ep_cost = 0
                 last_step = global_step
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
@@ -429,7 +428,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("charts/epsilon", epsilon, global_step)
 
                 scores.append(info['episode']['r'])
-                
+                ep_cost = 0
+
                 avg_mean_score = np.mean(scores[-100:])
                 writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
                 ## Save all the data
