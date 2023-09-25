@@ -17,6 +17,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 import gymnasium.spaces as spaces
 from src.utils import * 
+from src.models.risk_models import *
+from src.datasets.risk_datasets import * 
+
+
 def parse_args():
     # fmt: off
     parser = argparse.ArgumentParser()
@@ -118,7 +122,7 @@ def parse_args():
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--start-risk-update", type=int, default=10000,
         help="number of epochs to update the risk model") 
-    parser.add_argument("--rb-type", type=str, default="balanced",
+    parser.add_argument("--rb-type", type=str, default="simple",
         help="which type of replay buffer to use for ")
     parser.add_argument("--freeze-risk-layers", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
@@ -151,17 +155,19 @@ def make_env(cfg, seed, idx, capture_video, run_name):
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, env, action_size=2):
+    def __init__(self, env, action_size=2, risk_size=0):
         super().__init__()
         self.network = nn.Sequential(
-            nn.Linear(np.array(env.single_observation_space.shape).prod(), 120),
+            nn.Linear(np.array(env.single_observation_space.shape).prod() + risk_size, 120),
             nn.ReLU(),
             nn.Linear(120, 84),
             nn.ReLU(),
             nn.Linear(84, action_size),
         )
 
-    def forward(self, x):
+    def forward(self, x, risk=None):
+        if risk is not None:
+            x = torch.cat([x, risk], axis=-1)
         return self.network(x)
 
 
@@ -170,6 +176,59 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     return max(slope * t + start_e, end_e)
 
 
+
+def train_risk(cfg, model, data, criterion, opt, device):
+    model.train()
+    dataset = RiskyDataset(data["next_obs"].to('cpu'), data["actions"].to('cpu'), data["risks"].to('cpu'), False, risk_type=cfg.risk_type,
+                            fear_clip=None, fear_radius=cfg.fear_radius, one_hot=True, quantile_size=cfg.quantile_size, quantile_num=cfg.quantile_num)
+    dataloader = DataLoader(dataset, batch_size=cfg.risk_batch_size, shuffle=True, num_workers=10, generator=torch.Generator(device='cpu'))
+    net_loss = 0
+    for batch in dataloader:
+        pred = model(get_risk_obs(cfg, batch[0]).to(device))
+        if cfg.model_type == "mlp":
+            loss = criterion(pred, batch[1].squeeze().to(device))
+        else:
+            loss = criterion(pred, torch.argmax(batch[1].squeeze(), axis=1).to(device))
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+        net_loss += loss.item()
+
+    model.eval()
+    return net_loss
+
+def get_risk_obs(cfg, next_obs):
+    if "goal" in cfg.risk_model_path.lower():
+        if "push" in cfg.env_id.lower():
+            #print("push")
+            next_obs_risk = next_obs[:, :-16]
+        elif "button" in cfg.env_id.lower():
+            #print("button")
+            next_obs_risk = next_obs[:, list(range(24)) + list(range(40, 88))]
+        else:
+            next_obs_risk = next_obs
+    elif "button" in cfg.risk_model_path.lower():
+        if "push" in cfg.env_id.lower():
+            #print("push")
+            next_obs_risk = next_obs[:, list(range(24)) + list(range(72, 88)) + list(range(24, 72))]
+        elif "goal" in cfg.env_id.lower():
+            #print("button")
+            next_obs_risk = next_obs[:, list(range(24)) + list(range(24, 40)) + list(range(24, 72))]
+        else:
+            next_obs_risk = next_obs
+    elif "push" in cfg.risk_model_path.lower():
+        if "button" in cfg.env_id.lower():
+            #print("push")
+            next_obs_risk = next_obs[:, list(range(24)) + list(range(72, 88)) + list(range(24, 72))]
+        elif "goal" in cfg.env_id.lower():
+            #print("button")
+            next_obs_risk = next_obs[:, :-16]
+        else:
+            next_obs_risk = next_obs
+    else:
+        next_obs_risk = next_obs
+    return next_obs_risk        
 
 
 
@@ -226,10 +285,68 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
 
-    q_network = QNetwork(envs, action_size=len(action_map)).to(device)
+
+
+    args.use_risk = False if args.risk_model_path == "None" else True 
+
+    risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
+                        "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
+
+    risk_size_dict = {"continuous": 1, "binary": 2, "quantile": args.quantile_num}
+    risk_size = risk_size_dict[args.risk_type] if args.use_risk else 0
+    if args.fine_tune_risk:
+        if args.rb_type == "balanced":
+            risk_rb = ReplayBufferBalanced(buffer_size=args.total_timesteps)
+        else:
+            risk_rb = ReplayBuffer(buffer_size=args.total_timesteps)
+                          #, observation_space=envs.single_observation_space, action_space=envs.single_action_space)
+        if args.risk_type == "quantile":
+            weight_tensor = torch.Tensor([1]*args.quantile_num).to(device)
+            weight_tensor[0] = args.weight
+        elif args.risk_type == "binary":
+            weight_tensor = torch.Tensor([1., args.weight]).to(device)
+        if args.model_type == "bayesian":
+            criterion = nn.NLLLoss(weight=weight_tensor)
+        else:
+            criterion = nn.BCEWithLogitsLoss(pos_weight=weight_tensor)
+
+    if "goal" in args.risk_model_path.lower():
+        risk_obs_size = 72 
+    elif args.risk_model_path == "scratch":
+        risk_obs_size = np.array(envs.single_observation_space.shape).prod()
+    else:
+        risk_obs_size = 88
+
+
+
+    if args.use_risk:
+        risk_model = risk_model_class[args.model_type][args.risk_type](obs_size=risk_obs_size, batch_norm=True, out_size=risk_size)
+        if os.path.exists(args.risk_model_path):
+            risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
+            print("Pretrained risk model loaded successfully")
+
+        risk_model.to(device)
+        risk_model.eval()
+        if args.fine_tune_risk:
+            # print("Fine Tuning risk")
+            ## Freezing all except last layer of the risk model
+            if args.freeze_risk_layers:
+                for param in risk_model.parameters():
+                    param.requires_grad = False 
+                risk_model.out.weight.requires_grad = True
+                risk_model.out.bias.requires_grad = True 
+            opt_risk = optim.Adam(filter(lambda p: p.requires_grad, risk_model.parameters()), lr=args.risk_lr, eps=1e-10)
+            risk_model.eval()
+        else:
+            print("No model in the path specified!!")
+
+
+
+    q_network = QNetwork(envs, action_size=len(action_map), risk_size=risk_size).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
-    target_network = QNetwork(envs, action_size=len(action_map)).to(device)
+    target_network = QNetwork(envs, action_size=len(action_map), risk_size=risk_size).to(device)
     target_network.load_state_dict(q_network.state_dict())
+
 
     rb = buffers.ReplayBuffer(
         args.buffer_size,
@@ -251,10 +368,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     f_dones = None
     f_costs = None
 
+    risk, next_risk = None, None
+
     step_log = 0
     scores = []
     if args.collect_data:
-        #os.system("rm -rf %s"%args.storage_path)
         storage_path = os.path.join(args.storage_path, args.env_id, run.name)
         make_dirs(storage_path, 0) #episode)
     # TRY NOT TO MODIFY: start the game
@@ -267,14 +385,12 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if random.random() < epsilon:
             actions = np.array([get_random_action() for _ in range(envs.num_envs)])
         else:
-            q_values = q_network(torch.Tensor(obs).to(device))
+            risk = risk_model(get_risk_obs(args, torch.Tensor(obs).to(device))) if args.use_risk else None
+            q_values = q_network(torch.Tensor(obs).to(device), risk)
             actions = torch.argmax(q_values, dim=1).cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminated, truncated, infos = envs.step(map(action_map_fn, actions))
-        # info_dict = {'reward': rewards, 'done': done, 'cost': cost, 'obs': obs} 
-        # if args.collect_data:
-        #     store_data(next_obs, info_dict, storage_path, episode, step_log)
         done = np.logical_or(terminated, truncated)
 
         step_log += 1
@@ -292,9 +408,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             f_next_obs = torch.Tensor(next_obs) if f_next_obs is None else torch.concat([f_next_obs, torch.Tensor(next_obs)], axis=0)
             f_actions = torch.Tensor(actions) if f_actions is None else torch.concat([f_actions, torch.Tensor(actions)], axis=0)
             f_rewards = torch.Tensor(rewards) if f_rewards is None else torch.concat([f_rewards, torch.Tensor(rewards)], axis=0)
-            # f_risks = risk_ if f_risks is None else torch.concat([f_risks, risk_], axis=0)
             f_costs = torch.Tensor(cost) if f_costs is None else torch.concat([f_costs, torch.Tensor(cost)], axis=0)
-            # f_dones = torch.Tensor(next_done) if f_dones is None else torch.concat([f_dones, torch.Tensor(next_done)], axis=0)
 
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
@@ -314,21 +428,40 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 writer.add_scalar("charts/epsilon", epsilon, global_step)
 
-                #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
                 scores.append(info['episode']['r'])
                 
-                #avg_total_reward = np.mean(test_policy(args, agent, envs, device=device, risk_model=risk_model))
                 avg_mean_score = np.mean(scores[-100:])
                 writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
                 ## Save all the data
+                e_risks = torch.Tensor(np.array(list(reversed(range(int(info["episode"]["l"])))))).to(device) if cost > 0 else torch.Tensor(np.array([int(info["episode"]["l"])]*int(info["episode"]["l"]))).to(device)
+                if args.fine_tune_risk:
+                    f_risks = e_risks
+                    f_dist_to_fail = f_risks
+                    f_dones = torch.Tensor(np.array([0]*(f_risks.size()[0])))
+                    if args.rb_type == "balanced":
+                        idx_risky = (f_dist_to_fail<=args.fear_radius)
+                        idx_safe = (f_dist_to_fail>args.fear_radius)
+
+                        risk_rb.add_risky(f_obs[idx_risky], f_next_obs[idx_risky], f_actions[idx_risky], f_rewards[idx_risky], f_dones[idx_risky], f_costs[idx_risky], f_risks[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
+                        risk_rb.add_safe(f_obs[idx_safe], f_next_obs[idx_safe], f_actions[idx_safe], f_rewards[idx_safe], f_dones[idx_safe], f_costs[idx_safe], f_risks[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
+                    else: 
+                        risk_rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks, f_risks.unsqueeze(1))
+
+                        f_obs = None
+                        f_next_obs = None
+                        f_risks = None
+                        f_ep_len = [0]
+                        f_actions = None
+                        f_rewards = None
+                        f_dones = None
+                        f_costs = None
+
                 if args.collect_data:
-                    f_risks = torch.Tensor(np.array(list(reversed(range(int(info["episode"]["l"])))))).to(device) if cost > 0 else torch.Tensor(np.array([int(info["episode"]["l"])]*int(info["episode"]["l"]))).to(device)
+                    f_risks = e_risks if f_risks is None else torch.cat([f_risks, e_risks], axis=0)
                     torch.save(f_obs, os.path.join(storage_path, "obs.pt"))
                     torch.save(f_actions, os.path.join(storage_path, "actions.pt"))
                     torch.save(f_costs, os.path.join(storage_path, "costs.pt"))
                     torch.save(f_risks, os.path.join(storage_path, "risks.pt"))
-                    # torch.save(torch.Tensor(f_ep_len), os.path.join(storage_path, "ep_len.pt"))
-                    #make_dirs(storage_path, episode)
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
@@ -342,12 +475,25 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
+
+            # if global_step % args.update_risk_model == 0 and args.fine_tune_risk:
+            if args.use_risk and (global_step > args.learning_starts and args.fine_tune_risk) and global_step % args.risk_update_period == 0:
+                if args.finetune_risk_online:
+                    print("I am online")
+                    data = risk_rb.slice_data(-args.risk_batch_size*args.num_update_risk, 0)
+                else:
+                    data = risk_rb.sample(args.risk_batch_size*args.num_update_risk)
+                risk_loss = train_risk(args, risk_model, data, criterion, opt_risk, device)
+                writer.add_scalar("risk/risk_loss", risk_loss, global_step)
+
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
                 with torch.no_grad():
-                    target_max, _ = target_network(data.next_observations.float()).max(dim=1)
+                    next_risk = risk_model(get_risk_obs(args, data.next_observations.float())) if args.use_risk else None
+                    target_max, _ = target_network(data.next_observations.float(), next_risk).max(dim=1)
                     td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
-                old_val = q_network(data.observations.float()).gather(1, data.actions).squeeze()
+                risk = risk_model(get_risk_obs(args, data.observations.float())) if args.use_risk else None
+                old_val = q_network(data.observations.float(), risk).gather(1, data.actions).squeeze()
                 loss = F.mse_loss(td_target, old_val)
 
                 if global_step % 100 == 0:
