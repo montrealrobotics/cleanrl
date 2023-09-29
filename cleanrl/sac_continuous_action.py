@@ -277,7 +277,7 @@ if __name__ == "__main__":
     start_time = time.time()
 
     cum_cost, ep_cost = 0, 0 
-
+    scores = []
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset()
     for global_step in range(cfg.total_timesteps):
@@ -311,7 +311,11 @@ if __name__ == "__main__":
             # print(info)
             if info is None:
                 continue
-
+            scores.append(info['episode']['r'])
+            
+            #avg_total_reward = np.mean(test_policy(cfg, agent, envs, device=device, risk_model=risk_model))
+            avg_mean_score = np.mean(scores[-100:])
+            writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
             print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
             writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
             writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
