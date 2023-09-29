@@ -442,6 +442,7 @@ def get_risk_obs(cfg, next_obs):
             next_obs_risk = next_obs
     else:
         next_obs_risk = next_obs
+    #print(next_obs_risk.size())
     return next_obs_risk        
 
 
@@ -524,6 +525,7 @@ def train(cfg):
             print("Pretrained risk model loaded successfully")
 
         risk_model.to(device)
+        risk_model.eval()
         if cfg.fine_tune_risk:
             # print("Fine Tuning risk")
             ## Freezing all except last layer of the risk model
