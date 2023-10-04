@@ -376,7 +376,8 @@ def train_risk(cfg, model, data, criterion, opt, device):
         opt.step()
 
         net_loss += loss.item()
-
+    torch.save(self.model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
+    wandb.save("risk_model.pt")
     model.eval()
     return net_loss
 
@@ -708,6 +709,8 @@ def train(cfg):
                 #avg_total_reward = np.mean(test_policy(cfg, agent, envs, device=device, risk_model=risk_model))
                 avg_mean_score = np.mean(scores[-100:])
                 writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
+                torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
+                wandb.save("policy.pt")
                 print(f"global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
                 if cfg.use_risk:
                     ep_risk = torch.sum(all_risks[last_step:global_step]).item()
