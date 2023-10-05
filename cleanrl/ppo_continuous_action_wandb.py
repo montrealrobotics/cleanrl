@@ -376,7 +376,7 @@ def train_risk(cfg, model, data, criterion, opt, device):
         opt.step()
 
         net_loss += loss.item()
-    torch.save(self.model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
+    torch.save(model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
     wandb.save("risk_model.pt")
     model.eval()
     return net_loss
