@@ -123,6 +123,8 @@ def parse_args():
         help="fear radius for training the risk model")
     parser.add_argument("--risk-update-period", type=int, default=1000,
         help="how frequently to update the risk model")
+    parser.add_argument("--num-risk-epochs", type=int, default=1,
+        help="number of sgd steps to update the risk model")
     parser.add_argument("--num-update-risk", type=int, default=10,
         help="number of sgd steps to update the risk model")
     parser.add_argument("--risk-lr", type=float, default=1e-7,
@@ -680,12 +682,13 @@ def train(cfg):
                 #print(global_step)
                 # update_risk = 0
                 # while update_risk < cfg.num_update_risk:
-                if cfg.finetune_risk_online:
-                    print("I am online")
-                    data = rb.slice_data(-cfg.risk_batch_size*cfg.num_update_risk, 0)
-                else:
-                    data = rb.sample(cfg.risk_batch_size*cfg.num_update_risk)
-                risk_loss = train_risk(cfg, risk_model, data, criterion, opt_risk, device)
+                for epoch in cfg.num_risk_epochs:
+                    if cfg.finetune_risk_online:
+                        print("I am online")
+                        data = rb.slice_data(-cfg.risk_batch_size*cfg.num_update_risk, 0)
+                    else:
+                        data = rb.sample(cfg.risk_batch_size*cfg.num_update_risk)
+                    risk_loss = train_risk(cfg, risk_model, data, criterion, opt_risk, device)
                 writer.add_scalar("risk/risk_loss", risk_loss, global_step)
                     # update_risk += 1                
                 # fine_tune_risk(cfg, risk_model, f_obs[-cfg.num_risk_datapoints:], f_risks[-cfg.num_risk_datapoints:], opt_risk, device)
