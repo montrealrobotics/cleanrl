@@ -682,7 +682,7 @@ def train(cfg):
                 #print(global_step)
                 # update_risk = 0
                 # while update_risk < cfg.num_update_risk:
-                for epoch in cfg.num_risk_epochs:
+                for epoch in range(cfg.num_risk_epochs):
                     if cfg.finetune_risk_online:
                         print("I am online")
                         data = rb.slice_data(-cfg.risk_batch_size*cfg.num_update_risk, 0)
