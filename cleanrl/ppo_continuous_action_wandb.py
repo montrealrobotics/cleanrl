@@ -353,7 +353,10 @@ def risk_sgd_step(cfg, model, data, criterion, opt, device):
         if cfg.model_type == "mlp":
             loss = criterion(pred, one_hot(data["risks"]).to(device))
         else:
-            loss = criterion(pred, data["risks"].squeeze().to(torch.int64).to(device))
+            if cfg.risk_type == "quantile":
+                loss = criterion(pred, torch.argmax(data["risks"].squeeze(), axis=1).to(device))
+            else:
+                loss = criterion(pred, data["risks"].squeeze().to(torch.int64).to(device))
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -452,13 +455,7 @@ def get_risk_obs(cfg, next_obs):
 def train(cfg):
     # fmt: on
 
-    #run_name = f"{int(time.time())}"
-
-    #experiment = Experiment(
-    #    api_key="FlhfmY238jUlHpcRzzuIw3j2t",
-    #    project_name="risk-aware-exploration",
-    #    workspace="hbutsuak95",
-    #) 
+    risk_bins = np.array([i*cfg.quantile_size for i in range(cfg.quantile_num)])
     cfg.use_risk = False if cfg.risk_model_path == "None" else True 
 
     import wandb 
@@ -588,7 +585,7 @@ def train(cfg):
     f_rewards = None
     f_dones = None
     f_costs = None
-
+    f_risks_quant = None
     scores = []
     # risk_ = torch.Tensor([[1., 0.]]).to(device)
     # print(f_obs.size(), f_risks.size())
@@ -753,13 +750,15 @@ def train(cfg):
 
                 f_ep_len.append(f_ep_len[-1] + int(info["episode"]["l"]))
                 # f_dist_to_fail = torch.Tensor(np.array(list(reversed(range(f_obs.size()[0]))))).to(device) if cost > 0 else torch.Tensor(np.array([f_obs.size()[0]]*f_obs.shape[0])).to(device)
-                e_risks = torch.Tensor(np.array(list(reversed(range(int(info["episode"]["l"])))))).to(device) if cost > 0 else torch.Tensor(np.array([int(info["episode"]["l"])]*int(info["episode"]["l"]))).to(device)
+                e_risks = np.array(list(reversed(range(int(info["episode"]["l"]))))) if cost > 0 else np.array([int(info["episode"]["l"])]*int(info["episode"]["l"]))
                 # print(risks.size())
-                
+                e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(e_risks, 1))).to(device)
+                e_risks = torch.Tensor(e_risks).to(device)
+
                 if cfg.fine_tune_risk or cfg.collect_data:
                     f_risks = e_risks.unsqueeze(1) if f_risks is None else torch.cat([f_risks, e_risks.unsqueeze(1)], axis=0)
-                    f_risks_discrete = torch.zeros_like(f_risks)
-                    f_risks_discrete[-cfg.fear_radius:] = 1 
+                    f_risks_quant = e_risks_quant if f_risks_quant is None else torch.cat([f_risks_quant, e_risks_quant], axis=0)
+
                 if cfg.fine_tune_risk:
                     f_dist_to_fail = e_risks
                     if cfg.rb_type == "balanced":
@@ -778,7 +777,7 @@ def train(cfg):
                         if cfg.risk_type == "binary":
                             rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, (f_risks <= cfg.fear_radius).float(), e_risks.unsqueeze(1))
                         else:
-                            rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks, e_risks.unsqueeze(1))
+                            rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks_quant, f_risks)
 
                     f_obs = None    
                     f_next_obs = None
@@ -917,5 +916,6 @@ def train(cfg):
 if __name__ == "__main__":
     cfg = parse_args()
     train(cfg)
+
 
 
