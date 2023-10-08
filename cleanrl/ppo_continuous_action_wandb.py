@@ -123,6 +123,8 @@ def parse_args():
         help="fear radius for training the risk model")
     parser.add_argument("--risk-update-period", type=int, default=1000,
         help="how frequently to update the risk model")
+    parser.add_argument("--num-risk-epochs", type=int, default=1,
+        help="number of sgd steps to update the risk model")
     parser.add_argument("--num-update-risk", type=int, default=10,
         help="number of sgd steps to update the risk model")
     parser.add_argument("--risk-lr", type=float, default=1e-7,
@@ -345,13 +347,13 @@ def fine_tune_risk(cfg, model, inputs, targets, opt, device):
         return model
             
             
-def risk_sgd_step(cfg, model, batch, criterion, opt, device):
+def risk_sgd_step(cfg, model, data, criterion, opt, device):
         model.train()
-        pred = model(batch["next_obs"].to(device))
+        pred = model(data["next_obs"].to(device))
         if cfg.model_type == "mlp":
-            loss = criterion(pred, one_hot(batch["risks"]).to(device))
+            loss = criterion(pred, one_hot(data["risks"]).to(device))
         else:
-            loss = criterion(pred, batch["risks"].squeeze().to(torch.int64).to(device))
+            loss = criterion(pred, data["risks"].squeeze().to(torch.int64).to(device))
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -376,7 +378,8 @@ def train_risk(cfg, model, data, criterion, opt, device):
         opt.step()
 
         net_loss += loss.item()
-
+    torch.save(model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
+    wandb.save("risk_model.pt")
     model.eval()
     return net_loss
 
@@ -442,6 +445,7 @@ def get_risk_obs(cfg, next_obs):
             next_obs_risk = next_obs
     else:
         next_obs_risk = next_obs
+    #print(next_obs_risk.size())
     return next_obs_risk        
 
 
@@ -524,6 +528,7 @@ def train(cfg):
             print("Pretrained risk model loaded successfully")
 
         risk_model.to(device)
+        risk_model.eval()
         if cfg.fine_tune_risk:
             # print("Fine Tuning risk")
             ## Freezing all except last layer of the risk model
@@ -673,20 +678,25 @@ def train(cfg):
 
             obs_ = next_obs
             # if global_step % cfg.update_risk_model == 0 and cfg.fine_tune_risk:
-            if cfg.use_risk and (global_step > cfg.start_risk_update and cfg.fine_tune_risk) and global_step % cfg.risk_update_period == 0:
-                #print(global_step)
-                # update_risk = 0
-                # while update_risk < cfg.num_update_risk:
+            # if cfg.use_risk and (global_step > cfg.start_risk_update and cfg.fine_tune_risk) and global_step % cfg.risk_update_period == 0:
+            #     for epoch in range(cfg.num_risk_epochs):
+            #         if cfg.finetune_risk_online:
+            #             print("I am online")
+            #             data = rb.slice_data(-cfg.risk_batch_size*cfg.num_update_risk, 0)
+            #         else:
+            #             data = rb.sample(cfg.risk_batch_size*cfg.num_update_risk)
+            #         risk_loss = train_risk(cfg, risk_model, data, criterion, opt_risk, device)
+            #     writer.add_scalar("risk/risk_loss", risk_loss, global_step)
+
+
+            if cfg.use_risk and global_step > cfg.risk_batch_size and cfg.fine_tune_risk:
                 if cfg.finetune_risk_online:
                     print("I am online")
-                    data = rb.slice_data(-cfg.risk_batch_size*cfg.num_update_risk, 0)
+                    data = rb.slice_data(-cfg.risk_batch_size, 0)
                 else:
-                    data = rb.sample(cfg.risk_batch_size*cfg.num_update_risk)
-                risk_loss = train_risk(cfg, risk_model, data, criterion, opt_risk, device)
+                    data = rb.sample(cfg.risk_batch_size)                
+                risk_loss = risk_sgd_step(cfg, risk_model, data, criterion, opt_risk, device)
                 writer.add_scalar("risk/risk_loss", risk_loss, global_step)
-                    # update_risk += 1                
-                # fine_tune_risk(cfg, risk_model, f_obs[-cfg.num_risk_datapoints:], f_risks[-cfg.num_risk_datapoints:], opt_risk, device)
-
 
             # Only print when at least 1 env is done
             if "final_info" not in infos:
@@ -706,6 +716,8 @@ def train(cfg):
                 #avg_total_reward = np.mean(test_policy(cfg, agent, envs, device=device, risk_model=risk_model))
                 avg_mean_score = np.mean(scores[-100:])
                 writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
+                torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
+                wandb.save("policy.pt")
                 print(f"global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
                 if cfg.use_risk:
                     ep_risk = torch.sum(all_risks[last_step:global_step]).item()
@@ -753,11 +765,20 @@ def train(cfg):
                     if cfg.rb_type == "balanced":
                         idx_risky = (f_dist_to_fail<=cfg.fear_radius)
                         idx_safe = (f_dist_to_fail>cfg.fear_radius)
-
-                        rb.add_risky(f_obs[idx_risky], f_next_obs[idx_risky], f_actions[idx_risky], f_rewards[idx_risky], f_dones[idx_risky], f_costs[idx_risky], f_risks[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
-                        rb.add_safe(f_obs[idx_safe], f_next_obs[idx_safe], f_actions[idx_safe], f_rewards[idx_safe], f_dones[idx_safe], f_costs[idx_safe], f_risks[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
+                        risk_ones = torch.ones_like(f_risks)
+                        risk_zeros = torch.zeros_like(f_risks)
+                        
+                        if cfg.risk_type == "binary":
+                            rb.add_risky(f_obs[idx_risky], f_next_obs[idx_risky], f_actions[idx_risky], f_rewards[idx_risky], f_dones[idx_risky], f_costs[idx_risky], risk_ones[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
+                            rb.add_safe(f_obs[idx_safe], f_next_obs[idx_safe], f_actions[idx_safe], f_rewards[idx_safe], f_dones[idx_safe], f_costs[idx_safe], risk_zeros[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
+                        else:
+                            rb.add_risky(f_obs[idx_risky], f_next_obs[idx_risky], f_actions[idx_risky], f_rewards[idx_risky], f_dones[idx_risky], f_costs[idx_risky], f_risks[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
+                            rb.add_safe(f_obs[idx_safe], f_next_obs[idx_safe], f_actions[idx_safe], f_rewards[idx_safe], f_dones[idx_safe], f_costs[idx_safe], f_risks[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
                     else:
-                        rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks, e_risks.unsqueeze(1))
+                        if cfg.risk_type == "binary":
+                            rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, (f_risks <= cfg.fear_radius).float(), e_risks.unsqueeze(1))
+                        else:
+                            rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks, e_risks.unsqueeze(1))
 
                     f_obs = None    
                     f_next_obs = None
@@ -896,4 +917,5 @@ def train(cfg):
 if __name__ == "__main__":
     cfg = parse_args()
     train(cfg)
+
 
