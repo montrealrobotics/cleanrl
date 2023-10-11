@@ -54,6 +54,8 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="SafetyCarGoal1Gymnasium-v0",
         help="the id of the environment")
+    parser.add_argument("--reward-goal", type=float, default=10.0, 
+        help="reward to give when the goal is achieved")
     parser.add_argument("--early-termination", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="whether to terminate early i.e. when the catastrophe has happened")
     parser.add_argument("--term-cost", type=int, default=1,
@@ -131,8 +133,8 @@ def parse_args():
         help="the learning rate of the optimizer")
     parser.add_argument("--risk-batch-size", type=int, default=1000,
         help="number of epochs to update the risk model")
-    parser.add_argument("--fine-tune-risk", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
+    parser.add_argument("--fine-tune-risk", type=str, default="None",
+        help="fine tune risk by which method")
     parser.add_argument("--finetune-risk-online", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--start-risk-update", type=int, default=10000,
@@ -158,9 +160,9 @@ def parse_args():
 def make_env(cfg, idx, capture_video, run_name, gamma):
     def thunk():
         if capture_video:
-            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty)
+            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal)
         else:
-            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty)
+            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
@@ -366,7 +368,7 @@ def risk_sgd_step(cfg, model, data, criterion, opt, device):
 
 def train_risk(cfg, model, data, criterion, opt, device):
     model.train()
-    dataset = RiskyDataset(data["next_obs"].to('cpu'), data["actions"].to('cpu'), data["risks"].to('cpu'), False, risk_type=cfg.risk_type,
+    dataset = RiskyDataset(data["next_obs"].to('cpu'), data["actions"].to('cpu'), data["dist_to_fail"].to('cpu'), False, risk_type=cfg.risk_type,
                             fear_clip=None, fear_radius=cfg.fear_radius, one_hot=True, quantile_size=cfg.quantile_size, quantile_num=cfg.quantile_num)
     dataloader = DataLoader(dataset, batch_size=cfg.risk_batch_size, shuffle=True, num_workers=10, generator=torch.Generator(device='cpu'))
     net_loss = 0
@@ -687,15 +689,25 @@ def train(cfg):
             #         risk_loss = train_risk(cfg, risk_model, data, criterion, opt_risk, device)
             #     writer.add_scalar("risk/risk_loss", risk_loss, global_step)
 
-
-            if cfg.use_risk and buffer_num > cfg.risk_batch_size and cfg.fine_tune_risk:
-                if cfg.finetune_risk_online:
-                    print("I am online")
-                    data = rb.slice_data(-cfg.risk_batch_size, 0)
-                else:
-                    data = rb.sample(cfg.risk_batch_size)                
-                risk_loss = risk_sgd_step(cfg, risk_model, data, criterion, opt_risk, device)
-                writer.add_scalar("risk/risk_loss", risk_loss, global_step)
+            if cfg.fine_tune_risk == "sync":
+                if cfg.use_risk and buffer_num > cfg.risk_batch_size and cfg.fine_tune_risk:
+                    if cfg.finetune_risk_online:
+                        print("I am online")
+                        data = rb.slice_data(-cfg.risk_batch_size, 0)
+                    else:
+                        data = rb.sample(cfg.risk_batch_size)                
+                    risk_loss = risk_sgd_step(cfg, risk_model, data, criterion, opt_risk, device)
+                    writer.add_scalar("risk/risk_loss", risk_loss, global_step)
+            elif cfg.fine_tune_risk == "off":
+                if cfg.use_risk and (global_step > cfg.start_risk_update and cfg.fine_tune_risk) and global_step % cfg.risk_update_period == 0:
+                    for epoch in range(cfg.num_risk_epochs):
+                        if cfg.finetune_risk_online:
+                            print("I am online")
+                            data = rb.slice_data(-cfg.risk_batch_size*cfg.num_update_risk, 0)
+                        else:
+                            data = rb.sample(cfg.risk_batch_size*cfg.num_update_risk)
+                        risk_loss = train_risk(cfg, risk_model, data, criterion, opt_risk, device)
+                    writer.add_scalar("risk/risk_loss", risk_loss, global_step)              
 
             # Only print when at least 1 env is done
             if "final_info" not in infos:
@@ -756,7 +768,7 @@ def train(cfg):
                 e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(e_risks, 1))).to(device)
                 e_risks = torch.Tensor(e_risks).to(device)
 
-                
+                print(e_risks_quant.size())
                 if cfg.fine_tune_risk or cfg.collect_data:
                     f_risks = e_risks.unsqueeze(1)
                     f_risks_quant = e_risks_quant 
@@ -773,8 +785,8 @@ def train(cfg):
                             rb.add_risky(f_obs[i][idx_risky], f_next_obs[i][idx_risky], f_actions[i][idx_risky], f_rewards[i][idx_risky], f_dones[i][idx_risky], f_costs[i][idx_risky], risk_ones[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
                             rb.add_safe(f_obs[i][idx_safe], f_next_obs[i][idx_safe], f_actions[i][idx_safe], f_rewards[i][idx_safe], f_dones[i][idx_safe], f_costs[i][idx_safe], risk_zeros[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
                         else:
-                            rb.add_risky(f_obs[i][idx_risky], f_next_obs[i][idx_risky], f_actions[i][idx_risky], f_rewards[i][idx_risky], f_dones[i][idx_risky], f_costs[i][idx_risky], f_risks[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
-                            rb.add_safe(f_obs[i][idx_safe], f_next_obs[i][idx_safe], f_actions[i][idx_safe], f_rewards[i][idx_safe], f_dones[i][idx_safe], f_costs[i][idx_safe], f_risks[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
+                            rb.add_risky(f_obs[i][idx_risky], f_next_obs[i][idx_risky], f_actions[i][idx_risky], f_rewards[i][idx_risky], f_dones[i][idx_risky], f_costs[i][idx_risky], f_risks_quant[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
+                            rb.add_safe(f_obs[i][idx_safe], f_next_obs[i][idx_safe], f_actions[i][idx_safe], f_rewards[i][idx_safe], f_dones[i][idx_safe], f_costs[i][idx_safe], f_risks_quant[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
                     else:
                         if cfg.risk_type == "binary":
                             rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], (f_risks <= cfg.fear_radius).float(), e_risks.unsqueeze(1))
