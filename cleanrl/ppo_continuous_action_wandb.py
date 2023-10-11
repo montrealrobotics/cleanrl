@@ -596,6 +596,7 @@ def train(cfg):
         storage_path = os.path.join(cfg.storage_path, cfg.env_id, run.name)
         make_dirs(storage_path, episode)
 
+    buffer_num = 0
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if cfg.anneal_lr:
@@ -687,7 +688,7 @@ def train(cfg):
             #     writer.add_scalar("risk/risk_loss", risk_loss, global_step)
 
 
-            if cfg.use_risk and global_step > cfg.risk_batch_size and cfg.fine_tune_risk:
+            if cfg.use_risk and buffer_num > cfg.risk_batch_size and cfg.fine_tune_risk:
                 if cfg.finetune_risk_online:
                     print("I am online")
                     data = rb.slice_data(-cfg.risk_batch_size, 0)
@@ -708,6 +709,7 @@ def train(cfg):
                 ep_cost = info["cost_sum"]
                 cum_cost += ep_cost
                 ep_len = info["episode"]["l"][0]
+                buffer_num += ep_len
                 #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
                 scores.append(info['episode']['r'])
                 
