@@ -184,16 +184,16 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class RiskAgent(nn.Module):
-    def __init__(self, envs, risk_size=2, risk_actor=True, risk_critic=False):
+    def __init__(self, envs, risk_size=2, linear_size=64, risk_enc_size=12, risk_actor=True, risk_critic=False):
         super().__init__()
         ## Actor
-        self.actor_fc1 = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64))
-        self.actor_fc2 = layer_init(nn.Linear(76, 76))
-        self.actor_fc3 = layer_init(nn.Linear(76, np.prod(envs.single_action_space.shape)), std=0.01)
+        self.actor_fc1 = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), linear_size))
+        self.actor_fc2 = layer_init(nn.Linear(linear_size+risk_enc_size, linear_size))
+        self.actor_fc3 = layer_init(nn.Linear(linear_size, np.prod(envs.single_action_space.shape)), std=0.01)
         ## Critic
-        self.critic_fc1 = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64))
-        self.critic_fc2 = layer_init(nn.Linear(76, 76))
-        self.critic_fc3 = layer_init(nn.Linear(76, 1), std=0.01)
+        self.critic_fc1 = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), linear_size))
+        self.critic_fc2 = layer_init(nn.Linear(linear_size+risk_enc_size, linear_size))
+        self.critic_fc3 = layer_init(nn.Linear(linear_size, 1), std=0.01)
 
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
         self.tanh = nn.Tanh()
@@ -236,21 +236,21 @@ class RiskAgent(nn.Module):
 
 
 class Agent(nn.Module):
-    def __init__(self, envs, risk_size=None):
+    def __init__(self, envs, linear_size=64, risk_size=None):
         super().__init__()
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), linear_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(linear_size, linear_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
+            layer_init(nn.Linear(linear_size, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), linear_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(linear_size, linear_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+            layer_init(nn.Linear(linear_size, np.prod(envs.single_action_space.shape)), std=0.01),
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
@@ -268,21 +268,21 @@ class Agent(nn.Module):
 
 
 class ContRiskAgent(nn.Module):
-    def __init__(self, envs, risk_size=1):
+    def __init__(self, envs, linear_size=64, risk_size=1):
         super().__init__()
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod()+1, 64)),
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod()+1, linear_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(linear_size, linear_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
+            layer_init(nn.Linear(linear_size, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod()+1, 64)),
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod()+1, linear_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(linear_size, linear_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+            layer_init(nn.Linear(linear_size, np.prod(envs.single_action_space.shape)), std=0.01),
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
@@ -577,15 +577,15 @@ def train(cfg):
     step_log = 0
 
     ## Finetuning data collection 
-    f_obs = None
-    f_next_obs = None
-    f_risks = None
+    f_obs = [None]*cfg.num_envs
+    f_next_obs = [None]*cfg.num_envs
+    f_risks = [None]*cfg.num_envs
     f_ep_len = [0]
-    f_actions = None
-    f_rewards = None
-    f_dones = None
-    f_costs = None
-    f_risks_quant = None
+    f_actions = [None]*cfg.num_envs
+    f_rewards = [None]*cfg.num_envs
+    f_dones = [None]*cfg.num_envs
+    f_costs = [None]*cfg.num_envs
+    f_risks_quant = [None]*cfg.num_envs
     scores = []
     # risk_ = torch.Tensor([[1., 0.]]).to(device)
     # print(f_obs.size(), f_risks.size())
@@ -652,26 +652,27 @@ def train(cfg):
             #     store_data(next_obs, info_dict, storage_path, episode, step_log)
 
             step_log += 1
-            if not done:
-                cost = torch.Tensor(infos["cost"]).to(device).view(-1)
-                ep_cost += infos["cost"]; cum_cost += infos["cost"]
-            else:
-                cost = torch.Tensor(np.array([infos["final_info"][0]["cost"]])).to(device).view(-1)
-                ep_cost += np.array([infos["final_info"][0]["cost"]]); cum_cost += np.array([infos["final_info"][0]["cost"]])
-
+            # for i in range(cfg.num_envs):
+            #     if not done[i]:
+            #         cost = torch.Tensor(infos["cost"]).to(device).view(-1)
+            #         ep_cost += infos["cost"]; cum_cost += infos["cost"]
+            #     else:
+            #         cost = torch.Tensor(np.array([infos["final_info"][i]["cost"]])).to(device).view(-1)
+            #         ep_cost += np.array([infos["final_info"][i]["cost"]]); cum_cost += np.array([infos["final_info"][i]["cost"]])
 
             next_obs, next_done, reward = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device), torch.Tensor(reward).to(device)
+            # print(obs_.size())
+            cost = torch.Tensor(np.zeros(cfg.num_envs)).to(device)
 
             if cfg.fine_tune_risk or cfg.collect_data:
-                f_obs = obs_ if f_obs is None else torch.concat([f_obs, obs_], axis=0)
-                f_next_obs = next_obs if f_next_obs is None else torch.concat([f_next_obs, next_obs], axis=0)
-                f_actions = action if f_actions is None else torch.concat([f_actions, action], axis=0)
-                f_rewards = reward if f_rewards is None else torch.concat([f_rewards, reward], axis=0)
-                # f_risks = risk_ if f_risks is None else torch.concat([f_risks, risk_], axis=0)
-                f_costs = cost if f_costs is None else torch.concat([f_costs, cost], axis=0)
-                f_dones = next_done if f_dones is None else torch.concat([f_dones, next_done], axis=0)
-
-
+                for i in range(cfg.num_envs):
+                    f_obs[i] = obs_[i].unsqueeze(0) if f_obs[i] is None else torch.concat([f_obs[i], obs_[i].unsqueeze(0)], axis=0)
+                    f_next_obs[i] = next_obs[i].unsqueeze(0) if f_next_obs[i] is None else torch.concat([f_next_obs[i], next_obs[i].unsqueeze(0)], axis=0)
+                    f_actions[i] = action[i].unsqueeze(0) if f_actions[i] is None else torch.concat([f_actions[i], action[i].unsqueeze(0)], axis=0)
+                    f_rewards[i] = reward[i].unsqueeze(0) if f_rewards[i] is None else torch.concat([f_rewards[i], reward[i].unsqueeze(0)], axis=0)
+                    # f_risks = risk_ if f_risks is None else torch.concat([f_risks, risk_], axis=0)
+                    f_costs[i] = cost[i].unsqueeze(0) if f_costs[i] is None else torch.concat([f_costs[i], cost[i].unsqueeze(0)], axis=0)
+                    f_dones[i] = next_done[i].unsqueeze(0) if f_dones[i] is None else torch.concat([f_dones[i], next_done[i].unsqueeze(0)], axis=0)
 
             obs_ = next_obs
             # if global_step % cfg.update_risk_model == 0 and cfg.fine_tune_risk:
@@ -700,13 +701,13 @@ def train(cfg):
                 continue
 
 
-            for info in infos["final_info"]:
+            for i, info in enumerate(infos["final_info"]):
                 # Skip the envs that are not done
                 if info is None:
                     continue
-                ep_cost = torch.sum(all_costs[last_step:global_step]).item()
+                ep_cost = info["cost_sum"]
                 cum_cost += ep_cost
-
+                ep_len = info["episode"]["l"][0]
                 #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
                 scores.append(info['episode']['r'])
                 
@@ -741,23 +742,22 @@ def train(cfg):
 
 
                 writer.add_scalar("Performance/episodic_return", info["episode"]["r"], global_step)
-                writer.add_scalar("Performance/episodic_length", info["episode"]["l"], global_step)
+                writer.add_scalar("Performance/episodic_length", ep_len, global_step)
                 writer.add_scalar("Performance/episodic_cost", ep_cost, global_step)
                 writer.add_scalar("Performance/cummulative_cost", cum_cost, global_step)
                 last_step = global_step
                 episode += 1
                 step_log = 0
-
-                f_ep_len.append(f_ep_len[-1] + int(info["episode"]["l"]))
                 # f_dist_to_fail = torch.Tensor(np.array(list(reversed(range(f_obs.size()[0]))))).to(device) if cost > 0 else torch.Tensor(np.array([f_obs.size()[0]]*f_obs.shape[0])).to(device)
-                e_risks = np.array(list(reversed(range(int(info["episode"]["l"]))))) if cost > 0 else np.array([int(info["episode"]["l"])]*int(info["episode"]["l"]))
+                e_risks = np.array(list(reversed(range(int(ep_len))))) if cum_cost > 0 else np.array([int(ep_len)]*int(ep_len))
                 # print(risks.size())
                 e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(e_risks, 1))).to(device)
                 e_risks = torch.Tensor(e_risks).to(device)
 
+                
                 if cfg.fine_tune_risk or cfg.collect_data:
-                    f_risks = e_risks.unsqueeze(1) if f_risks is None else torch.cat([f_risks, e_risks.unsqueeze(1)], axis=0)
-                    f_risks_quant = e_risks_quant if f_risks_quant is None else torch.cat([f_risks_quant, e_risks_quant], axis=0)
+                    f_risks = e_risks.unsqueeze(1)
+                    f_risks_quant = e_risks_quant 
 
                 if cfg.fine_tune_risk:
                     f_dist_to_fail = e_risks
@@ -768,25 +768,25 @@ def train(cfg):
                         risk_zeros = torch.zeros_like(f_risks)
                         
                         if cfg.risk_type == "binary":
-                            rb.add_risky(f_obs[idx_risky], f_next_obs[idx_risky], f_actions[idx_risky], f_rewards[idx_risky], f_dones[idx_risky], f_costs[idx_risky], risk_ones[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
-                            rb.add_safe(f_obs[idx_safe], f_next_obs[idx_safe], f_actions[idx_safe], f_rewards[idx_safe], f_dones[idx_safe], f_costs[idx_safe], risk_zeros[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
+                            rb.add_risky(f_obs[i][idx_risky], f_next_obs[i][idx_risky], f_actions[i][idx_risky], f_rewards[i][idx_risky], f_dones[i][idx_risky], f_costs[i][idx_risky], risk_ones[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
+                            rb.add_safe(f_obs[i][idx_safe], f_next_obs[i][idx_safe], f_actions[i][idx_safe], f_rewards[i][idx_safe], f_dones[i][idx_safe], f_costs[i][idx_safe], risk_zeros[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
                         else:
-                            rb.add_risky(f_obs[idx_risky], f_next_obs[idx_risky], f_actions[idx_risky], f_rewards[idx_risky], f_dones[idx_risky], f_costs[idx_risky], f_risks[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
-                            rb.add_safe(f_obs[idx_safe], f_next_obs[idx_safe], f_actions[idx_safe], f_rewards[idx_safe], f_dones[idx_safe], f_costs[idx_safe], f_risks[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
+                            rb.add_risky(f_obs[i][idx_risky], f_next_obs[i][idx_risky], f_actions[i][idx_risky], f_rewards[i][idx_risky], f_dones[i][idx_risky], f_costs[i][idx_risky], f_risks[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
+                            rb.add_safe(f_obs[i][idx_safe], f_next_obs[i][idx_safe], f_actions[i][idx_safe], f_rewards[i][idx_safe], f_dones[i][idx_safe], f_costs[i][idx_safe], f_risks[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
                     else:
                         if cfg.risk_type == "binary":
-                            rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, (f_risks <= cfg.fear_radius).float(), e_risks.unsqueeze(1))
+                            rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], (f_risks <= cfg.fear_radius).float(), e_risks.unsqueeze(1))
                         else:
-                            rb.add(f_obs, f_next_obs, f_actions, f_rewards, f_dones, f_costs, f_risks_quant, f_risks)
+                            rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], f_risks_quant, f_risks)
 
-                    f_obs = None    
-                    f_next_obs = None
+                    f_obs[i] = None    
+                    f_next_obs[i] = None
                     f_risks = None
                     #f_ep_len = None
-                    f_actions = None
-                    f_rewards = None
-                    f_dones = None
-                    f_costs = None
+                    f_actions[i] = None
+                    f_rewards[i] = None
+                    f_dones[i] = None
+                    f_costs[i] = None
 
                 ## Save all the data
                 if cfg.collect_data:
