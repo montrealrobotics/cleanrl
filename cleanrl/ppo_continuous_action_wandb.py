@@ -5,7 +5,7 @@ import random
 import time
 from distutils.util import strtobool
 
-import safety_gymnasium
+import safety_gymnasium, panda_gym
 import gymnasium as gym
 import numpy as np
 import torch
@@ -54,7 +54,9 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="SafetyCarGoal1Gymnasium-v0",
         help="the id of the environment")
-    parser.add_argument("--reward-goal", type=float, default=10.0, 
+    parser.add_argument("--reward-goal", type=float, default=1.0, 
+        help="reward to give when the goal is achieved")
+    parser.add_argument("--reward-distance", type=float, default=1.0, 
         help="reward to give when the goal is achieved")
     parser.add_argument("--early-termination", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="whether to terminate early i.e. when the catastrophe has happened")
@@ -160,9 +162,9 @@ def parse_args():
 def make_env(cfg, idx, capture_video, run_name, gamma):
     def thunk():
         if capture_video:
-            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal)
+            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
         else:
-            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal)
+            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
