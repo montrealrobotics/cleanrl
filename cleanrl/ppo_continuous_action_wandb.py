@@ -775,7 +775,7 @@ def train(cfg):
                     f_risks = e_risks.unsqueeze(1)
                     f_risks_quant = e_risks_quant 
 
-                if cfg.fine_tune_risk:
+                if cfg.fine_tune_risk in ["off", "sync"]:
                     f_dist_to_fail = e_risks
                     if cfg.rb_type == "balanced":
                         idx_risky = (f_dist_to_fail<=cfg.fear_radius)
