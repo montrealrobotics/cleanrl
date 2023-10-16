@@ -60,6 +60,8 @@ def parse_args():
         help="reward to give when the goal is achieved")
     parser.add_argument("--early-termination", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="whether to terminate early i.e. when the catastrophe has happened")
+    parser.add_argument("--unifying-lidar", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="what kind of sensor is used (same for every environment?)")
     parser.add_argument("--term-cost", type=int, default=1,
         help="how many violations before you terminate")
     parser.add_argument("--failure-penalty", type=float, default=0.0,
@@ -353,7 +355,7 @@ def fine_tune_risk(cfg, model, inputs, targets, opt, device):
             
 def risk_sgd_step(cfg, model, data, criterion, opt, device):
         model.train()
-        pred = model(data["next_obs"].to(device))
+        pred = model(get_risk_obs(cfg, data["next_obs"]).to(device))
         if cfg.model_type == "mlp":
             loss = criterion(pred, one_hot(data["risks"]).to(device))
         else:
@@ -423,6 +425,8 @@ def test_policy(cfg, agent, envs, device, risk_model=None):
             
             
 def get_risk_obs(cfg, next_obs):
+    if cfg.unifying_lidar:
+        return next_obs
     if "goal" in cfg.risk_model_path.lower():
         if "push" in cfg.env_id.lower():
             #print("push")
@@ -601,6 +605,7 @@ def train(cfg):
         make_dirs(storage_path, episode)
 
     buffer_num = 0
+    goal_met = 0;  ep_goal_met = 0
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if cfg.anneal_lr:
@@ -651,7 +656,9 @@ def train(cfg):
             next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
-
+            step_goal_met = int(infos["final_info"][0]["goal_met"]) if done else int(infos["goal_met"][0])
+            ep_goal_met += step_goal_met 
+            goal_met += step_goal_met 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'obs': obs} 
             # if cfg.collect_data:
             #     store_data(next_obs, info_dict, storage_path, episode, step_log)
@@ -726,6 +733,9 @@ def train(cfg):
                 buffer_num += ep_len
                 #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
                 scores.append(info['episode']['r'])
+                writer.add_scalar("Ep Goal Achieved ", ep_goal_met, global_step)
+                writer.add_scalar("Total Goal Achieved", goal_met, global_step)
+                ep_goal_met = 0
                 
                 #avg_total_reward = np.mean(test_policy(cfg, agent, envs, device=device, risk_model=risk_model))
                 avg_mean_score = np.mean(scores[-100:])
@@ -771,9 +781,11 @@ def train(cfg):
                 e_risks = torch.Tensor(e_risks).to(device)
 
                 print(e_risks_quant.size())
-                if cfg.fine_tune_risk or cfg.collect_data:
+                if cfg.fine_tune_risk:
                     f_risks = e_risks.unsqueeze(1)
                     f_risks_quant = e_risks_quant 
+                elif cfg.collect_data:
+                    f_risks = e_risks.unsqueeze(1) if f_risks is None else torch.concat([f_risks, e_risks.unsqueeze(1)], axis=0)
 
                 if cfg.fine_tune_risk in ["off", "sync"]:
                     f_dist_to_fail = e_risks
