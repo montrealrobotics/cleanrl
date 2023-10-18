@@ -240,6 +240,39 @@ class RiskAgent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x, risk)
 
+class RiskAgent1(nn.Module):
+    def __init__(self, envs, linear_size=64, risk_size=2):
+        super().__init__()
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod()+risk_size, linear_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(linear_size, linear_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(linear_size, 1), std=1.0),
+        )
+        self.actor_mean = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod()+risk_size, linear_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(linear_size, linear_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(linear_size, np.prod(envs.single_action_space.shape)), std=0.01),
+        )
+        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+
+    def get_value(self, x, risk):
+        x = torch.cat([x, risk], axis=1)
+        return self.critic(x)
+
+    def get_action_and_value(self, x, risk, action=None):
+        x = torch.cat([x, risk], axis=1)
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+
 
 class Agent(nn.Module):
     def __init__(self, envs, linear_size=64, risk_size=None):
@@ -524,7 +557,7 @@ def train(cfg):
     if cfg.use_risk:
         print("using risk")
         #if cfg.risk_type == "binary":
-        agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
+        agent = RiskAgent1(envs=envs, risk_size=risk_size).to(device)
         #else:
         #    agent = ContRiskAgent(envs=envs).to(device)
         risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=risk_obs_size, batch_norm=True, out_size=risk_size)
