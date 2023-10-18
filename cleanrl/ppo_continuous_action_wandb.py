@@ -689,9 +689,7 @@ def train(cfg):
             next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
-            step_goal_met = int(infos["final_info"][0]["goal_met"]) if done else int(infos["goal_met"][0])
-            ep_goal_met += step_goal_met 
-            goal_met += step_goal_met 
+
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'obs': obs} 
             # if cfg.collect_data:
             #     store_data(next_obs, info_dict, storage_path, episode, step_log)
@@ -764,9 +762,10 @@ def train(cfg):
                 cum_cost += ep_cost
                 ep_len = info["episode"]["l"][0]
                 buffer_num += ep_len
+                goal_met += info["cum_goal_met"]
                 #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
                 scores.append(info['episode']['r'])
-                writer.add_scalar("Ep Goal Achieved ", ep_goal_met, global_step)
+                writer.add_scalar("Ep Goal Achieved ", info["cum_goal_met"], global_step)
                 writer.add_scalar("Total Goal Achieved", goal_met, global_step)
                 ep_goal_met = 0
                 
