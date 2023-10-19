@@ -71,6 +71,10 @@ def parse_args():
     parser.add_argument("--storage-path", type=str, default="./data/ppo/term_1",
         help="the storage path for the data collected")
     
+    parser.add_argument("--training-method", type=str, default="cost",
+        help="which training method to use (max cost or max update steps)? ")
+    parser.add_argument("--max-cum-cost", type=int, default=1000,
+        help="maximum cummulative cost before terminating")
     parser.add_argument("--total-timesteps", type=int, default=100000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=3e-4,
@@ -639,7 +643,17 @@ def train(cfg):
 
     buffer_num = 0
     goal_met = 0;  ep_goal_met = 0
-    for update in range(1, num_updates + 1):
+    update = 0
+    while True:
+        print(cfg.training_method, cum_cost, cfg.max_cum_cost)
+        if cfg.training_method == "steps" and update > num_updates:
+            break
+        elif cfg.training_method == "cost" and cum_cost > cfg.max_cum_cost:
+            break
+        else:
+            pass
+        update += 1
+    #for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if cfg.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
@@ -774,30 +788,12 @@ def train(cfg):
                 writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
                 torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
                 wandb.save("policy.pt")
-                print(f"global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
+                print(f"cummulative_cost={cum_cost}, global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
                 if cfg.use_risk:
                     ep_risk = torch.sum(all_risks[last_step:global_step]).item()
                     cum_risk += ep_risk
-
-                    #risk_cost_int = torch.logical_and(f_risks, all_risks[last_step:global_step])
-                    #ep_risk_cost_int = torch.sum(risk_cost_int).item()
-                    #cum_risk_cost_int += ep_risk_cost_int
-
                     writer.add_scalar("risk/episodic_risk", ep_risk, global_step)
                     writer.add_scalar("risk/cummulative_risk", cum_risk, global_step)
-                    #writer.add_scalar("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
-                    #writer.add_scalar("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
-
-
-                    #experiment.log_metric("charts/episodic_risk", ep_risk, global_step)
-                    #experiment.log_metric("charts/cummulative_risk", cum_risk, global_step)
-                    #experiment.log_metric("charts/episodic_risk_&&_cost", ep_risk_cost_int, global_step)
-                    #experiment.log_metric("charts/cummulative_risk_&&_cost", cum_risk_cost_int, global_step)
-
-                    #print(f"global_step={global_step}, ep_Risk_cost_int={ep_risk_cost_int}, cum_Risk_cost_int={cum_risk_cost_int}")
-                    #print(f"global_step={global_step}, episodic_risk={ep_risk}, cum_risks={cum_risk}, cum_costs={cum_cost}")
-
-
 
                 writer.add_scalar("Performance/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("Performance/episodic_length", ep_len, global_step)
