@@ -561,7 +561,7 @@ def train(cfg):
     if cfg.use_risk:
         print("using risk")
         #if cfg.risk_type == "binary":
-        agent = RiskAgent1(envs=envs, risk_size=risk_size).to(device)
+        agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
         #else:
         #    agent = ContRiskAgent(envs=envs).to(device)
         risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=risk_obs_size, batch_norm=True, out_size=risk_size)
