@@ -53,7 +53,7 @@ def parse_args():
         help="the initial lambda")
     parser.add_argument("--vf-lr", type=float, default=1e-3,
         help="the learning rate of the value function optimizer")
-    parser.add_argument("--cost-limit", type=float, default=25,
+    parser.add_argument("--cost-limit", type=float, default=1,
         help="the limit of cost per episode")
     parser.add_argument("--num-envs", type=int, default=1,
         help="the number of parallel game environments")
@@ -137,7 +137,7 @@ def parse_args():
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
-        env = gym.make(env_id)
+        env = gym.make(env_id,  early_termination=False, failure_penalty=0)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
             if idx == 0:
@@ -385,6 +385,9 @@ if __name__ == "__main__":
     else:
         risk_obs_size = 88
 
+
+    penalty_param = torch.tensor(args.xlambda,requires_grad=True).float()
+
     if args.use_risk:
         print("using risk")
         #if args.risk_type == "binary":
@@ -410,13 +413,18 @@ if __name__ == "__main__":
             risk_model.eval()
         else:
             print("No model in the path specified!!")
+        actor_optimizer = optim.Adam(list(agent.actor_fc1.parameters()) + list(agent.actor_fc2.parameters()) + list(agent.actor_fc3.parameters()) + list(agent.risk_encoder_actor.parameters()), lr=args.learning_rate, eps=1e-5)
+        critic_optimizer = optim.Adam(list(agent.critic_fc1.parameters()) + list(agent.critic_fc2.parameters()) + list(agent.critic_fc3.parameters()) + list(agent.risk_encoder_critic.parameters()), lr=args.vf_lr, eps=1e-5)
+        cost_optimizer = optim.Adam(list(agent.coster_fc1.parameters()) + list(agent.coster_fc2.parameters()) + list(agent.coster_fc3.parameters()) + list(agent.risk_encoder_coster.parameters()), lr=args.vf_lr, eps=1e-5)
+        penalty_optimizer =optim.Adam([penalty_param], lr=args.penalty_lr)#惩罚系数优化器
+
     else:
         agent = Agent(envs=envs).to(device)
-    penalty_param = torch.tensor(args.xlambda,requires_grad=True).float()
-    actor_optimizer = optim.Adam(list(agent.actor_fc1.parameters()) + list(agent.actor_fc2.parameters()) + list(agent.actor_fc3.parameters()) + list(agent.risk_encoder_actor.parameters()), lr=args.learning_rate, eps=1e-5)
-    critic_optimizer = optim.Adam(list(agent.critic_fc1.parameters()) + list(agent.critic_fc2.parameters()) + list(agent.critic_fc3.parameters()) + list(agent.risk_encoder_critic.parameters()), lr=args.vf_lr, eps=1e-5)
-    cost_optimizer = optim.Adam(list(agent.coster_fc1.parameters()) + list(agent.coster_fc2.parameters()) + list(agent.coster_fc3.parameters()) + list(agent.risk_encoder_coster.parameters()), lr=args.vf_lr, eps=1e-5)
-    penalty_optimizer =optim.Adam([penalty_param], lr=args.penalty_lr)#惩罚系数优化器
+
+        actor_optimizer = optim.Adam(agent.actor.parameters(), lr=args.learning_rate, eps=1e-5)
+        critic_optimizer = optim.Adam(agent.critic.parameters(), lr=args.vf_lr, eps=1e-5)
+        cost_optimizer = optim.Adam(agent.coster.parameters(), lr=args.vf_lr, eps=1e-5)
+        penalty_optimizer =optim.Adam([penalty_param], lr=args.penalty_lr)#惩罚系数优化器
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
@@ -553,7 +561,10 @@ if __name__ == "__main__":
                 #if "episode" in item.keys():
                 count += 1
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episodic_cost={ep_cost}")
+                
                 reward_pool.append(info['episode']['r'])
+                writer.add_scalar("costs/episodic_cost", ep_cost, global_step)
+                ep_cost = 0
                 if count == 30:
                     writer.add_scalar("charts/episodic_return", np.mean(reward_pool), global_step)
                     count = 0
