@@ -641,9 +641,9 @@ if __name__ == "__main__":
 
             #calculate average ep cost
             episode_cost = []
-            accumulate_cost = torch.zeros([args.num_envs],dtype=torch.float32)
+            accumulate_cost = torch.zeros([args.num_envs],dtype=torch.float32).to(device)
             for t in range(args.num_steps):
-                if torch.eq(dones[t],torch.zeros([args.num_envs],dtype=torch.float32)).all().item() is True :
+                if torch.eq(dones[t],torch.zeros([args.num_envs],dtype=torch.float32).to(device)).all().item() is True :
                     accumulate_cost += costs[t]
                 else: 
                     indx = torch.where(dones[t]==1)
