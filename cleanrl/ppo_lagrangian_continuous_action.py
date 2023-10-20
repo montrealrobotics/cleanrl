@@ -467,6 +467,7 @@ if __name__ == "__main__":
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // args.batch_size
     ep_cost = np.zeros(args.num_envs)
+    total_cost = ep_cost
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -561,12 +562,13 @@ if __name__ == "__main__":
                 #if "episode" in item.keys():
                 count += 1
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episodic_cost={ep_cost}")
-                
+                total_cost += ep_cost
                 reward_pool.append(info['episode']['r'])
                 writer.add_scalar("costs/episodic_cost", ep_cost, global_step)
                 ep_cost = 0
                 if count == 30:
                     writer.add_scalar("charts/episodic_return", np.mean(reward_pool), global_step)
+                    writer.add_scalar("costs/Cummulative Cost", total_cost, global_step)
                     count = 0
                     # writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
                 f_ep_len.append(f_ep_len[-1] + int(info["episode"]["l"]))
