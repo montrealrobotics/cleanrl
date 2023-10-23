@@ -29,7 +29,7 @@ def parse_args():
         help="seed of the experiment")
     parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if toggled, `torch.backends.cudnn.deterministic=False`")
-    parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+    parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if toggled, cuda will be enabled by default")
     parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="if toggled, this experiment will be tracked with Weights and Biases")
@@ -43,6 +43,8 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="Safexp-PointGoal1-v0",
         help="the id of the environment")
+    parser.add_argument("--collect-data", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument("--total-timesteps", type=int, default=10000000, #
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=3e-4,
@@ -467,7 +469,7 @@ if __name__ == "__main__":
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // args.batch_size
     ep_cost = np.zeros(args.num_envs)
-    total_cost = ep_cost
+    total_cost = 0
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -527,13 +529,13 @@ if __name__ == "__main__":
             costs[step] = torch.tensor(cost_array).to(device).view(-1)
             next_obs, next_done, reward, cost = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device), torch.Tensor(reward).to(device), torch.tensor(cost_array).to(device).view(-1)
             if args.fine_tune_risk or args.collect_data:
-                f_obs = obs_ if f_obs is None else torch.concat([f_obs, obs_], axis=0)
-                f_next_obs = next_obs if f_next_obs is None else torch.concat([f_next_obs, next_obs], axis=0)
-                f_actions = action if f_actions is None else torch.concat([f_actions, action], axis=0)
-                f_rewards = reward if f_rewards is None else torch.concat([f_rewards, reward], axis=0)
+                f_obs = obs_.to("cpu") if f_obs is None else torch.concat([f_obs, obs_.to("cpu")], axis=0)
+                f_next_obs = next_obs.to("cpu") if f_next_obs is None else torch.concat([f_next_obs, next_obs.to("cpu")], axis=0)
+                f_actions = action.to("cpu") if f_actions is None else torch.concat([f_actions, action.to("cpu")], axis=0)
+                f_rewards = reward.to("cpu") if f_rewards is None else torch.concat([f_rewards, reward.to("cpu")], axis=0)
                 # f_risks = risk_ if f_risks is None else torch.concat([f_risks, risk_], axis=0)
-                f_costs = cost if f_costs is None else torch.concat([f_costs, cost], axis=0)
-                f_dones = next_done if f_dones is None else torch.concat([f_dones, next_done], axis=0)
+                f_costs = cost.to("cpu") if f_costs is None else torch.concat([f_costs, cost.to("cpu")], axis=0)
+                f_dones = next_done.to("cpu") if f_dones is None else torch.concat([f_dones, next_done.to("cpu")], axis=0)
 
             obs_ = next_obs
 
@@ -573,7 +575,7 @@ if __name__ == "__main__":
                     # writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
                 f_ep_len.append(f_ep_len[-1] + int(info["episode"]["l"]))
                 # f_dist_to_fail = torch.Tensor(np.array(list(reversed(range(f_obs.size()[0]))))).to(device) if cost > 0 else torch.Tensor(np.array([f_obs.size()[0]]*f_obs.shape[0])).to(device)
-                e_risks = torch.Tensor(np.array(list(reversed(range(int(info["episode"]["l"])))))).to(device) if cost > 0 else torch.Tensor(np.array([int(info["episode"]["l"])]*int(info["episode"]["l"]))).to(device)
+                e_risks = torch.Tensor(np.array(list(reversed(range(int(info["episode"]["l"])))))) if cost > 0 else torch.Tensor(np.array([int(info["episode"]["l"])]*int(info["episode"]["l"])))
                 # print(risks.size())
                 
                 if args.fine_tune_risk or args.collect_data:
