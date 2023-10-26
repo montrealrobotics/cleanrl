@@ -14,6 +14,8 @@ import torch.optim as optim
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from torch.distributions.normal import Normal
+from torch.distributions.categorical import Categorical
+
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.functional import * 
 
@@ -167,16 +169,24 @@ def parse_args():
 
 def make_env(cfg, idx, capture_video, run_name, gamma):
     def thunk():
-        if capture_video:
-            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+
+        if "safety" in cfg.env_id.lower():
+            if capture_video:
+                env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            else:
+                env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
         else:
-            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            if capture_video:
+                env = gym.make(cfg.env_id, render_mode="rgb_array")
+            else:
+                env = gym.make(cfg.env_id)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
             if idx == 0:
                 env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        env = gym.wrappers.ClipAction(env)
+        
+        # env = gym.wrappers.ClipAction(env)
         env = gym.wrappers.NormalizeObservation(env)
         env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
@@ -279,8 +289,13 @@ class RiskAgent1(nn.Module):
 
 
 class Agent(nn.Module):
-    def __init__(self, envs, linear_size=64, risk_size=None):
+    def __init__(self, envs, linear_size=64, risk_size=None, policy_type="categorical"):
         super().__init__()
+        self.policy_type = policy_type
+        if policy_type == "categorical":
+            action_size = np.prod(envs.single_action_space.n)
+        else:
+            action_size = np.prod(envs.single_action_space.shape)
         self.critic = nn.Sequential(
             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), linear_size)),
             nn.Tanh(),
@@ -293,21 +308,29 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(linear_size, linear_size)),
             nn.Tanh(),
-            layer_init(nn.Linear(linear_size, np.prod(envs.single_action_space.shape)), std=0.01),
+            layer_init(nn.Linear(linear_size, action_size), std=0.01),
         )
-        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+        if policy_type == "continuous":
+            self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
     def get_value(self, x):
         return self.critic(x)
 
     def get_action_and_value(self, x, action=None):
         action_mean = self.actor_mean(x)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
-        action_std = torch.exp(action_logstd)
-        probs = Normal(action_mean, action_std)
+        if self.policy_type == "continuous":
+            action_logstd = self.actor_logstd.expand_as(action_mean)
+            action_std = torch.exp(action_logstd)
+        if self.policy_type == "categorical":
+            probs = Categorical(logits=action_mean)
+        else:
+            probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+        if self.policy_type == "categorical":
+            return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+        else:
+            return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
 
 class ContRiskAgent(nn.Module):
@@ -424,8 +447,9 @@ def train_risk(cfg, model, data, criterion, opt, device):
         opt.step()
 
         net_loss += loss.item()
-    torch.save(model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
-    wandb.save("risk_model.pt")
+    if cfg.track:
+        torch.save(model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
+        wandb.save("risk_model.pt")
     model.eval()
     print("risk_loss:", net_loss)
     return net_loss
@@ -510,7 +534,7 @@ def train(cfg):
                    monitor_gym=True,
                    sync_tensorboard=True, save_code=True)
 
-    #run_name = "something"
+    # run_name = "something"
     run_name = run.name
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
@@ -529,7 +553,8 @@ def train(cfg):
     envs = gym.vector.SyncVectorEnv(
         [make_env(cfg, i, cfg.capture_video, run_name, cfg.gamma) for i in range(cfg.num_envs)]
     )
-    assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+
+    # assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     risk_model_class = {"bayesian": {"continuous": BayesRiskEstCont, "binary": BayesRiskEst, "quantile": BayesRiskEst}, 
                         "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
@@ -763,6 +788,7 @@ def train(cfg):
 
             for i, info in enumerate(infos["final_info"]):
                 # Skip the envs that are not done
+                info["cost_sum"], info["cum_goal_met"] = int(info["crashed"]), 0
                 if info is None:
                     continue
                 ep_cost = info["cost_sum"]
@@ -781,8 +807,9 @@ def train(cfg):
                 #avg_total_reward = np.mean(test_policy(cfg, agent, envs, device=device, risk_model=risk_model))
                 avg_mean_score = np.mean(scores[-100:])
                 writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
-                torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
-                wandb.save("policy.pt")
+                if cfg.track:
+                    torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
+                    wandb.save("policy.pt")
                 print(f"cummulative_cost={cum_cost}, global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
                 if cfg.use_risk:
                     ep_risk = torch.sum(all_risks[last_step:global_step]).item()
