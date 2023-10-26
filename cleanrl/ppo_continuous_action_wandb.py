@@ -204,18 +204,24 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class RiskAgent(nn.Module):
-    def __init__(self, envs, risk_size=2, linear_size=64, risk_enc_size=12, risk_actor=True, risk_critic=False):
+    def __init__(self, envs, risk_size=2, linear_size=64, risk_enc_size=12, risk_actor=True, risk_critic=False, policy_type="categorical"):
         super().__init__()
+        self.policy_type = policy_type
+        if policy_type == "categorical":
+            action_size = np.prod(envs.single_action_space.n)
+        else:
+            action_size = np.prod(envs.single_action_space.shape)
         ## Actor
         self.actor_fc1 = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), linear_size))
         self.actor_fc2 = layer_init(nn.Linear(linear_size+risk_enc_size, linear_size))
-        self.actor_fc3 = layer_init(nn.Linear(linear_size, np.prod(envs.single_action_space.shape)), std=0.01)
+        self.actor_fc3 = layer_init(nn.Linear(linear_size, action_size), std=0.01)
         ## Critic
         self.critic_fc1 = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), linear_size))
         self.critic_fc2 = layer_init(nn.Linear(linear_size+risk_enc_size, linear_size))
         self.critic_fc3 = layer_init(nn.Linear(linear_size, 1), std=0.01)
 
-        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+        if policy_type == "continuous":
+            self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
         self.tanh = nn.Tanh()
 
         self.risk_encoder_actor = nn.Sequential(
@@ -247,12 +253,19 @@ class RiskAgent(nn.Module):
 
     def get_action_and_value(self, x, risk, action=None):
         action_mean = self.forward_actor(x, risk)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
-        action_std = torch.exp(action_logstd)
-        probs = Normal(action_mean, action_std)
+        if self.policy_type == "continuous":
+            action_logstd = self.actor_logstd.expand_as(action_mean)
+            action_std = torch.exp(action_logstd)
+        if self.policy_type == "categorical":
+            probs = Categorical(logits=action_mean)
+        else:
+            probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x, risk)
+        if self.policy_type == "categorical":
+            return action, probs.log_prob(action), probs.entropy(), self.get_value(x, risk)
+        else:
+            return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x, risk)
 
 class RiskAgent1(nn.Module):
     def __init__(self, envs, linear_size=64, risk_size=2):
