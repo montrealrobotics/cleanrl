@@ -127,7 +127,7 @@ def parse_args():
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--risk-type", type=str, default="binary",
         help="whether the risk is binary or continuous")
-    parser.add_argument("--fear-radius", type=int, default=5,
+    parser.add_argument("--fear-radius", type=int, default=100,
         help="fear radius for training the risk model")
     parser.add_argument("--num-risk-datapoints", type=int, default=1000,
         help="fear radius for training the risk model")
@@ -409,7 +409,7 @@ def risk_sgd_step(cfg, model, data, criterion, opt, device):
 
 def train_risk(cfg, model, data, criterion, opt, device):
     model.train()
-    dataset = RiskyDataset(data["next_obs"].to('cpu'), None, data["risks"].to('cpu'), False, risk_type=cfg.risk_type,
+    dataset = RiskyDataset(data["next_obs"].to('cpu'), None, data["dist_to_fail"].to('cpu'), False, risk_type=cfg.risk_type,
                             fear_clip=None, fear_radius=cfg.fear_radius, one_hot=True, quantile_size=cfg.quantile_size, quantile_num=cfg.quantile_num)
     dataloader = DataLoader(dataset, batch_size=cfg.risk_batch_size, shuffle=True, num_workers=10, generator=torch.Generator(device='cpu'))
     net_loss = 0
@@ -460,42 +460,7 @@ def test_policy(cfg, agent, envs, device, risk_model=None):
     #print(total_reward)
     #print(avg_reward)
     return avg_reward 
-            
-            
-def get_risk_obs(cfg, next_obs):
-    if cfg.unifying_lidar:
-        return next_obs
-    if "goal" in cfg.risk_model_path.lower():
-        if "push" in cfg.env_id.lower():
-            #print("push")
-            next_obs_risk = next_obs[:, :-16]
-        elif "button" in cfg.env_id.lower():
-            #print("button")
-            next_obs_risk = next_obs[:, list(range(24)) + list(range(40, 88))]
-        else:
-            next_obs_risk = next_obs
-    elif "button" in cfg.risk_model_path.lower():
-        if "push" in cfg.env_id.lower():
-            #print("push")
-            next_obs_risk = next_obs[:, list(range(24)) + list(range(72, 88)) + list(range(24, 72))]
-        elif "goal" in cfg.env_id.lower():
-            #print("button")
-            next_obs_risk = next_obs[:, list(range(24)) + list(range(24, 40)) + list(range(24, 72))]
-        else:
-            next_obs_risk = next_obs
-    elif "push" in cfg.risk_model_path.lower():
-        if "button" in cfg.env_id.lower():
-            #print("push")
-            next_obs_risk = next_obs[:, list(range(24)) + list(range(72, 88)) + list(range(24, 72))]
-        elif "goal" in cfg.env_id.lower():
-            #print("button")
-            next_obs_risk = next_obs[:, :-16]
-        else:
-            next_obs_risk = next_obs
-    else:
-        next_obs_risk = next_obs
-    #print(next_obs_risk.size())
-    return next_obs_risk        
+
 
 
 def train(cfg):
@@ -538,9 +503,9 @@ def train(cfg):
     risk_size = risk_size_dict[cfg.risk_type]
     if cfg.fine_tune_risk != "None":
         if cfg.rb_type == "balanced":
-            rb = ReplayBufferBalanced(buffer_size=cfg.total_timesteps)
+            rb = ReplayBufferBalanced(buffer_size=cfg.total_timesteps, fear_radius=cfg.fear_radius)
         else:
-            rb = ReplayBuffer(buffer_size=cfg.total_timesteps)
+            rb = ReplayBuffer(buffer_size=cfg.total_timesteps, fear_radius=cfg.fear_radius)
                           #, observation_space=envs.single_observation_space, action_space=envs.single_action_space)
         if cfg.risk_type == "quantile":
             weight_tensor = torch.Tensor([1]*cfg.quantile_num).to(device)
@@ -588,7 +553,7 @@ def train(cfg):
         agent = Agent(envs=envs).to(device)
 
     optimizer = optim.Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
-
+    risk_model = risk_model.cuda()
     # print(envs.single_observation_space.shape)
     # ALGO Logic: Storage setup
     obs = torch.zeros((cfg.num_steps, cfg.num_envs) + envs.single_observation_space.shape).to(device)
@@ -663,8 +628,7 @@ def train(cfg):
 
             if cfg.use_risk:
                 with torch.no_grad():
-                    next_obs_risk = get_risk_obs(cfg, next_obs)
-                    next_risk = torch.Tensor(risk_model(next_obs_risk.to(device))).to(device)
+                    next_risk = risk_model(next_obs.to(device))
                     if cfg.risk_type == "continuous":
                         next_risk = next_risk.unsqueeze(0)
                 #print(next_risk.size())
@@ -828,7 +792,7 @@ def train(cfg):
                         if cfg.risk_type == "binary":
                             rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], (f_risks <= cfg.fear_radius).float(), e_risks.unsqueeze(1))
                         else:
-                            rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], f_risks, f_risks)
+                            rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], f_risks_quant, f_risks)
 
                     f_obs[i] = None    
                     f_next_obs[i] = None
