@@ -66,8 +66,10 @@ def parse_args():
         help="what kind of sensor is used (same for every environment?)")
     parser.add_argument("--term-cost", type=int, default=1,
         help="how many violations before you terminate")
-    parser.add_argument("--failure-penalty", type=float, default=0.0,
+    parser.add_argument("--failure-penalty", type=float, default=-1.0,
         help="Reward Penalty when you fail")
+    parser.add_argument("--vehicles-density", type=int, default=1,
+        help="how many violations before you terminate")    
     parser.add_argument("--collect-data", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="store data while trianing")
     parser.add_argument("--storage-path", type=str, default="./data/ppo/term_1",
@@ -180,6 +182,12 @@ def make_env(cfg, idx, capture_video, run_name, gamma):
                 env = gym.make(cfg.env_id, render_mode="rgb_array")
             else:
                 env = gym.make(cfg.env_id)
+            env.configure({"reward_speed_range": [20, 100],
+                            "collision_reward": -cfg.failure_penalty,
+                            "vehicles_count": 100,
+                            "duration": 100,
+                            "vehicles_density": cfg.vehicles_density})
+
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
@@ -445,7 +453,7 @@ def risk_sgd_step(cfg, model, data, criterion, opt, device):
 
 def train_risk(cfg, model, data, criterion, opt, device):
     model.train()
-    dataset = RiskyDataset(data["next_obs"].to('cpu'), None, data["risks"].to('cpu'), False, risk_type=cfg.risk_type,
+    dataset = RiskyDataset(data["next_obs"].to('cpu'), None, data["dist_to_fail"].to('cpu'), False, risk_type=cfg.risk_type,
                             fear_clip=None, fear_radius=cfg.fear_radius, one_hot=True, quantile_size=cfg.quantile_size, quantile_num=cfg.quantile_num)
     dataloader = DataLoader(dataset, batch_size=cfg.risk_batch_size, shuffle=True, num_workers=10, generator=torch.Generator(device='cpu'))
     net_loss = 0
