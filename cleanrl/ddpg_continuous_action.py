@@ -6,13 +6,17 @@ import time
 from distutils.util import strtobool
 
 import gymnasium as gym
+import panda_gym
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from stable_baselines3.common.buffers import ReplayBuffer
+from stable_baselines3.common.buffers import ReplayBuffer, DictReplayBuffer
+from stable_baselines3 import HerReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
+from stable_baselines3.common.vec_env import DummyVecEnv
+
 
 
 def parse_args():
@@ -90,24 +94,55 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 class QNetwork(nn.Module):
     def __init__(self, env):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
+        print(env.observation_space)
+        self.obs_fc = nn.Linear(np.array(env.observation_space["observation"].shape).prod(), 64)
+        self.ag_fc = nn.Linear(np.array(env.observation_space["achieved_goal"].shape).prod(), 12)
+        self.dg_fc = nn.Linear(np.array(env.observation_space["desired_goal"].shape).prod(), 12)
+
+        self.fc1 = nn.Linear(88 + np.prod(env.action_space.shape), 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 1)
 
     def forward(self, x, a):
+        obs, ag, dg = self.obs_fc(x["observation"].float()), self.ag_fc(x["achieved_goal"].float()), self.dg_fc(x["desired_goal"].float())
+        x = torch.cat([obs, ag, dg], 1)
         x = torch.cat([x, a], 1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
         return x
 
+class QRiskNetwork(nn.Module):
+    def __init__(self, env, risk_size=2):
+        super().__init__()
+        print(env.observation_space)
+        self.obs_fc = nn.Linear(np.array(env.observation_space["observation"].shape).prod(), 64)
+        self.ag_fc = nn.Linear(np.array(env.observation_space["achieved_goal"].shape).prod(), 12)
+        self.dg_fc = nn.Linear(np.array(env.observation_space["desired_goal"].shape).prod(), 12)
+        self.risk_fc = nn.Linear(risk_size, 12)
+
+        self.fc1 = nn.Linear(100 + np.prod(env.action_space.shape), 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, 1)
+
+    def forward(self, x, a, risk):
+        obs, ag, dg, risk = self.obs_fc(x["observation"].float()), self.ag_fc(x["achieved_goal"].float()), self.dg_fc(x["desired_goal"].float()), self.risk_fc(risk.float())
+        x = torch.cat([obs, ag, dg, risk], 1)
+        x = torch.cat([x, a], 1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
 
 class Actor(nn.Module):
     def __init__(self, env):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
+        self.obs_fc = nn.Linear(np.array(env.observation_space["observation"].shape).prod(), 64)
+        self.ag_fc = nn.Linear(np.array(env.observation_space["achieved_goal"].shape).prod(), 12)
+        self.dg_fc = nn.Linear(np.array(env.observation_space["desired_goal"].shape).prod(), 12)
+        self.fc1 = nn.Linear(88, 256)
         self.fc2 = nn.Linear(256, 256)
-        self.fc_mu = nn.Linear(256, np.prod(env.single_action_space.shape))
+        self.fc_mu = nn.Linear(256, np.prod(env.action_space.shape))
         # action rescaling
         self.register_buffer(
             "action_scale", torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32)
@@ -117,11 +152,46 @@ class Actor(nn.Module):
         )
 
     def forward(self, x):
+        obs, ag, dg = self.obs_fc(x["observation"].float()), self.ag_fc(x["achieved_goal"].float()), self.dg_fc(x["desired_goal"].float())
+        x = torch.cat([obs, ag, dg], 1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = torch.tanh(self.fc_mu(x))
         return x * self.action_scale + self.action_bias
 
+class RiskActor(nn.Module):
+    def __init__(self, env, risk_size=2):
+        super().__init__()
+        self.obs_fc = nn.Linear(np.array(env.observation_space["observation"].shape).prod(), 64)
+        self.ag_fc = nn.Linear(np.array(env.observation_space["achieved_goal"].shape).prod(), 12)
+        self.dg_fc = nn.Linear(np.array(env.observation_space["desired_goal"].shape).prod(), 12)
+        self.risk_fc = nn.Linear(risk_size, 12)
+        self.fc1 = nn.Linear(100, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc_mu = nn.Linear(256, np.prod(env.action_space.shape))
+        # action rescaling
+        self.register_buffer(
+            "action_scale", torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32)
+        )
+        self.register_buffer(
+            "action_bias", torch.tensor((env.action_space.high + env.action_space.low) / 2.0, dtype=torch.float32)
+        )
+
+    def forward(self, x, risk):
+        obs, ag, dg, risk = self.obs_fc(x["observation"].float()), self.ag_fc(x["achieved_goal"].float()), self.dg_fc(x["desired_goal"].float()), self.risk_fc(risk.float())
+        x = torch.cat([obs, ag, dg, risk], 1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = torch.tanh(self.fc_mu(x))
+        return x * self.action_scale + self.action_bias
+
+
+
+def convert_dict_to_tensor(data, device):
+    new_data = {}
+    for key in data.keys():
+        new_data[key] = torch.Tensor(data[key]).to(device).double()
+    return new_data
 
 if __name__ == "__main__":
     import stable_baselines3 as sb3
@@ -162,8 +232,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
-    assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+    envs = DummyVecEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+
+    # envs = gym.wrappers.RecordEpisodeStatistics(gym.make(args.env_id)) #SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    assert isinstance(envs.action_space, gym.spaces.Box), "only continuous action space is supported"
 
     actor = Actor(envs).to(device)
     qf1 = QNetwork(envs).to(device)
@@ -174,46 +246,63 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     q_optimizer = optim.Adam(list(qf1.parameters()), lr=args.learning_rate)
     actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.learning_rate)
 
-    envs.single_observation_space.dtype = np.float32
-    rb = ReplayBuffer(
+    envs.observation_space.dtype = np.float32
+    rb = HerReplayBuffer(
         args.buffer_size,
-        envs.single_observation_space,
-        envs.single_action_space,
+        envs.observation_space,
+        envs.action_space,
+        envs,
         device,
         handle_timeout_termination=False,
     )
+    # print(envs.observation_space, envs.action_space)
+    # rb = ReplayBuffer(
+    #     args.buffer_size,
+    #     envs.observation_space,
+    #     envs.action_space,
+    #     device,
+    #     handle_timeout_termination=False,
+    # )
     start_time = time.time()
-
+    num_successes, total_cost = 0, 0
     # TRY NOT TO MODIFY: start the game
-    obs, _ = envs.reset(seed=args.seed)
+    obs = envs.reset()
+    score, success_rate = [], []
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            actions = envs.action_space.sample().reshape(1, 3)
         else:
             with torch.no_grad():
-                actions = actor(torch.Tensor(obs).to(device))
+                actions = actor(convert_dict_to_tensor(obs, device))
                 actions += torch.normal(0, actor.action_scale * args.exploration_noise)
-                actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
+                actions = actions.cpu().numpy().clip(envs.action_space.low, envs.action_space.high)
 
         # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, rewards, terminateds, truncateds, infos = envs.step(actions)
-
+        next_obs, rewards, dones, infos = envs.step(actions)
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-
-        if "final_info" in infos:
-            for info in infos["final_info"]:
+        for info in infos:
+            if 'episode' in info.keys():
+                total_cost += infos[0]["cost"]
+                num_successes += int(infos[0]["is_success"])
+                success_rate.append(int(infos[0]["is_success"]))
+                score.append(info["episode"]['r'])
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
-                break
+                writer.add_scalar("charts/Total Success", num_successes, global_step)
+                writer.add_scalar("charts/Success rate", np.mean(success_rate[-100:]), global_step)
+                writer.add_scalar("charts/Avg. Return", np.mean(score[-100:]), global_step)
+                writer.add_scalar("cost/ep_cost", info["cost"], global_step)
+                writer.add_scalar("cost/total_cost", total_cost, global_step)
 
+                break
         # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
         real_next_obs = next_obs.copy()
-        for idx, d in enumerate(truncateds):
+        for idx, d in enumerate(dones):
             if d:
-                real_next_obs[idx] = infos["final_observation"][idx]
-        rb.add(obs, real_next_obs, actions, rewards, terminateds, infos)
+                real_next_obs = infos[idx]["terminal_observation"]
+        rb.add(obs, real_next_obs, actions, rewards, dones, infos)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
