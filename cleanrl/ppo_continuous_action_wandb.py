@@ -567,7 +567,7 @@ def train(cfg):
         agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
         #else:
         #    agent = ContRiskAgent(envs=envs).to(device)
-        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=risk_obs_size, batch_norm=True, out_size=risk_size)
+        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=True, out_size=risk_size)
         if os.path.exists(cfg.risk_model_path):
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             print("Pretrained risk model loaded successfully")
