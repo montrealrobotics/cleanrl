@@ -50,6 +50,8 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="HalfCheetah-v4",
         help="the id of the environment")
+    parser.add_argument("--collect-data", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="whether to upload the saved model to huggingface")
     parser.add_argument("--num-envs", type=int, default=1,
         help="the number of parallel game environments")
     parser.add_argument("--total-timesteps", type=int, default=1000000,
