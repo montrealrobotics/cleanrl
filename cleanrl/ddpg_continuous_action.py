@@ -480,11 +480,12 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(e_risks, 1)))
                 e_risks = torch.Tensor(e_risks)
 
-                if args.risk_type == "binary":
-                    risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, (e_risks <= args.fear_radius).float(), e_risks.unsqueeze(1))
-                else:
-                    risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, e_risks_quant, e_risks.unsqueeze(1))
-                f_obs[i], f_next_obs[i], f_actions[i] = None, None, None
+                if args.use_risk and args.fine_tune_risk != "None":
+                    if args.risk_type == "binary":
+                        risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, (e_risks <= args.fear_radius).float(), e_risks.unsqueeze(1))
+                    else:
+                        risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, e_risks_quant, e_risks.unsqueeze(1))
+                    f_obs[i], f_next_obs[i], f_actions[i] = None, None, None
                 break
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
