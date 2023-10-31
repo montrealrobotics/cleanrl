@@ -109,6 +109,8 @@ def parse_args():
         help="the target KL divergence threshold")
     parser.add_argument("--reward-penalty", type=float, default=0,
         help="coefficient of the value function")
+    parser.add_argument("--pretrained-policy-path", type=str, default="None",
+        help="the pretrained policy to transfer")
     
     ## Arguments related to risk model 
     parser.add_argument("--use-risk", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
@@ -586,7 +588,11 @@ def train(cfg):
             print("No model in the path specified!!")
     else:
         agent = Agent(envs=envs).to(device)
-
+        if os.path.exists(cfg.pretrained_policy_path):
+            agent.load_state_dict(torch.load(cfg.pretrained_policy_path, map_location=device))
+            print("Pretrained policy loaded successfully")
+        else:
+            print("No pretrained model")
     optimizer = optim.Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
     # print(envs.single_observation_space.shape)
