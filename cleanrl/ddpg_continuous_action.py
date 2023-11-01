@@ -354,10 +354,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     if args.use_risk:
         print("using risk")
         #if args.risk_type == "binary":
-        actor = RiskActor(envs).to(device)
+        actor = RiskActor(envs, risk_size).to(device)
         qf1 = QNetwork(envs).to(device)
         qf1_target = QNetwork(envs).to(device)
-        target_actor = RiskActor(envs).to(device)
+        target_actor = RiskActor(envs, risk_size).to(device)
         #Risk model
         risk_model = risk_model_class[args.model_type][args.risk_type](obs_size=np.array(envs.observation_space["observation"].shape).prod(), batch_norm=True, out_size=risk_size)
         if os.path.exists(args.risk_model_path):
@@ -485,7 +485,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                         risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, (e_risks <= args.fear_radius).float(), e_risks.unsqueeze(1))
                     else:
                         risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, e_risks_quant, e_risks.unsqueeze(1))
-                    f_obs[i], f_next_obs[i], f_actions[i] = None, None, None
+                f_obs[i], f_next_obs[i], f_actions[i] = None, None, None
                 break
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
