@@ -588,11 +588,11 @@ def train(cfg):
             print("No model in the path specified!!")
     else:
         agent = Agent(envs=envs).to(device)
-        if os.path.exists(cfg.pretrained_policy_path):
-            agent.load_state_dict(torch.load(cfg.pretrained_policy_path, map_location=device))
-            print("Pretrained policy loaded successfully")
-        else:
-            print("No pretrained model")
+    if os.path.exists(cfg.pretrained_policy_path):
+        agent.load_state_dict(torch.load(cfg.pretrained_policy_path, map_location=device))
+        print("Pretrained policy loaded successfully")
+    else:
+        print("No pretrained model")
     optimizer = optim.Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
     # print(envs.single_observation_space.shape)
