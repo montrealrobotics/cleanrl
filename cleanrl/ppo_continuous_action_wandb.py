@@ -707,9 +707,8 @@ def train(cfg):
             next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
 
-
-            reward -= risk_penalty 
-            rewards[step] = torch.tensor(reward).to(device).view(-1)
+ 
+            rewards[step] = torch.tensor(reward).to(device).view(-1) - risk_penalty 
 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'obs': obs} 
             # if cfg.collect_data:
