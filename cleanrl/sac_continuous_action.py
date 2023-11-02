@@ -5,7 +5,8 @@ import random
 import time
 from distutils.util import strtobool
 
-import gym
+import panda_gym
+import gymnasium as gym 
 import numpy as np
 import torch
 import torch.nn as nn
@@ -14,6 +15,12 @@ import torch.optim as optim
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3 import HerReplayBuffer
+
+from src.models.risk_models import *
+from src.datasets.risk_datasets import *
+from src.utils import * 
 
 def parse_args():
     # fmt: off
@@ -76,7 +83,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         if capture_video:
             if idx == 0:
                 env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        env.seed(seed)
+        # env.seed(seed)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env
@@ -88,11 +95,16 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 class SoftQNetwork(nn.Module):
     def __init__(self, env):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
+        self.obs_fc = nn.Linear(np.array(env.observation_space["observation"].shape).prod(), 64)
+        self.ag_fc = nn.Linear(np.array(env.observation_space["achieved_goal"].shape).prod(), 12)
+        self.dg_fc = nn.Linear(np.array(env.observation_space["desired_goal"].shape).prod(), 12)
+        self.fc1 = nn.Linear(88 + np.prod(env.action_space.shape), 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 1)
 
     def forward(self, x, a):
+        obs, ag, dg = self.obs_fc(x["observation"].float()), self.ag_fc(x["achieved_goal"].float()), self.dg_fc(x["desired_goal"].float())
+        x = torch.cat([obs, ag, dg], 1)
         x = torch.cat([x, a], 1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
@@ -107,10 +119,13 @@ LOG_STD_MIN = -5
 class Actor(nn.Module):
     def __init__(self, env):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
+        self.obs_fc = nn.Linear(np.array(env.observation_space["observation"].shape).prod(), 64)
+        self.ag_fc = nn.Linear(np.array(env.observation_space["achieved_goal"].shape).prod(), 12)
+        self.dg_fc = nn.Linear(np.array(env.observation_space["desired_goal"].shape).prod(), 12)
+        self.fc1 = nn.Linear(88, 256)
         self.fc2 = nn.Linear(256, 256)
-        self.fc_mean = nn.Linear(256, np.prod(env.single_action_space.shape))
-        self.fc_logstd = nn.Linear(256, np.prod(env.single_action_space.shape))
+        self.fc_mean = nn.Linear(256, np.prod(env.action_space.shape))
+        self.fc_logstd = nn.Linear(256, np.prod(env.action_space.shape))
         # action rescaling
         self.register_buffer(
             "action_scale", torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32)
@@ -120,6 +135,8 @@ class Actor(nn.Module):
         )
 
     def forward(self, x):
+        obs, ag, dg = self.obs_fc(x["observation"].float()), self.ag_fc(x["achieved_goal"].float()), self.dg_fc(x["desired_goal"].float())
+        x = torch.cat([obs, ag, dg], 1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         mean = self.fc_mean(x)
@@ -143,6 +160,11 @@ class Actor(nn.Module):
         mean = torch.tanh(mean) * self.action_scale + self.action_bias
         return action, log_prob, mean
 
+def convert_dict_to_tensor(data, device):
+    new_data = {}
+    for key in data.keys():
+        new_data[key] = torch.Tensor(data[key]).to(device).double()
+    return new_data
 
 if __name__ == "__main__":
     args = parse_args()
@@ -174,10 +196,10 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
-    assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+    envs = DummyVecEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    assert isinstance(envs.action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    max_action = float(envs.single_action_space.high[0])
+    max_action = float(envs.action_space.high[0])
 
     actor = Actor(envs).to(device)
     qf1 = SoftQNetwork(envs).to(device)
@@ -191,31 +213,41 @@ if __name__ == "__main__":
 
     # Automatic entropy tuning
     if args.autotune:
-        target_entropy = -torch.prod(torch.Tensor(envs.single_action_space.shape).to(device)).item()
+        target_entropy = -torch.prod(torch.Tensor(envs.action_space.shape).to(device)).item()
         log_alpha = torch.zeros(1, requires_grad=True, device=device)
         alpha = log_alpha.exp().item()
         a_optimizer = optim.Adam([log_alpha], lr=args.q_lr)
     else:
         alpha = args.alpha
 
-    envs.single_observation_space.dtype = np.float32
-    rb = ReplayBuffer(
+    envs.observation_space.dtype = np.float32
+    # rb = ReplayBuffer(
+    #     args.buffer_size,
+    #     envs.observation_space-,
+    #     envs.action_space,
+    #     device,
+    #     handle_timeout_termination=True,
+    # )
+    rb = HerReplayBuffer(
         args.buffer_size,
-        envs.single_observation_space,
-        envs.single_action_space,
+        envs.observation_space,
+        envs.action_space,
+        envs,
         device,
-        handle_timeout_termination=True,
+        handle_timeout_termination=False,
     )
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
     obs = envs.reset()
+    score, success_rate = [], []
+    num_successes, total_cost = 0, 0
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            actions = np.array([envs.action_space.sample() for _ in range(envs.num_envs)])
         else:
-            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
+            actions, _, _ = actor.get_action(convert_dict_to_tensor(obs, device))
             actions = actions.detach().cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
@@ -224,9 +256,19 @@ if __name__ == "__main__":
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         for info in infos:
             if "episode" in info.keys():
+                ep_len = info["episode"]["l"]
+                total_cost += infos[0]["cost"]
+                num_successes += int(infos[0]["is_success"])
+                success_rate.append(int(infos[0]["is_success"]))
+                score.append(info["episode"]['r'])
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                writer.add_scalar("charts/Total Success", num_successes, global_step)
+                writer.add_scalar("charts/Success rate", np.mean(success_rate[-100:]), global_step)
+                writer.add_scalar("charts/Avg. Return", np.mean(score[-100:]), global_step)
+                writer.add_scalar("cost/ep_cost", info["cost"], global_step)
+                writer.add_scalar("cost/total_cost", total_cost, global_step)
                 break
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`

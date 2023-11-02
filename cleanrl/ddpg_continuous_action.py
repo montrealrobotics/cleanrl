@@ -112,7 +112,7 @@ def parse_args():
         help="fine tune risk by which method")
     parser.add_argument("--finetune-risk-online", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
-    parser.add_argument("--start-risk-update", type=int, default=10000,
+    parser.add_argument("--start-risk-update", type=int, default=100,
         help="number of epochs to update the risk model") 
     parser.add_argument("--rb-type", type=str, default="simple",
         help="which type of replay buffer to use for ")
@@ -240,31 +240,20 @@ class RiskActor(nn.Module):
         x = torch.tanh(self.fc_mu(x))
         return x * self.action_scale + self.action_bias
 
-class RiskDataset(nn.Module):
-    def __init__(self, inputs, targets):
-        self.inputs = inputs
-        self.targets = targets
 
-    def __len__(self):
-        return self.inputs.size()[0]
-
-    def __getitem__(self, idx):
-        y = torch.zeros(2)
-        y[int(self.targets[idx][0])] = 1.0
-        return self.inputs[idx], y
     
 def train_risk(cfg, model, data, criterion, opt, device):
     model.train()
-    dataset = RiskyDataset(data["next_obs"].to('cpu'), None, data["dist_to_fail"].to('cpu'), False, risk_type=cfg.risk_type,
+    dataset = RiskyDataset(data["obs"].to('cpu'), data["actions"].to('cpu'), data["dist_to_fail"].to('cpu'), action=True, risk_type=cfg.risk_type,
                             fear_clip=None, fear_radius=cfg.fear_radius, one_hot=True, quantile_size=cfg.quantile_size, quantile_num=cfg.quantile_num)
     dataloader = DataLoader(dataset, batch_size=cfg.risk_batch_size, shuffle=True, num_workers=4, generator=torch.Generator(device='cpu'))
     net_loss = 0
     for batch in dataloader:
-        pred = model(batch[0].to(device))
+        pred = model(batch[0].to(device), batch[1].to(device))
         if cfg.model_type == "mlp":
-            loss = criterion(pred, batch[1].squeeze().to(device))
+            loss = criterion(pred, batch[2].squeeze().to(device))
         else:
-            loss = criterion(pred, torch.argmax(batch[1].squeeze(), axis=1).to(device))
+            loss = criterion(pred, torch.argmax(batch[2].squeeze(), axis=1).to(device))
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -350,7 +339,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         else:
             criterion = nn.BCEWithLogitsLoss(pos_weight=weight_tensor)
 
-
+    action_size = np.prod(envs.action_space.shape)
     if args.use_risk:
         print("using risk")
         #if args.risk_type == "binary":
@@ -359,7 +348,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         qf1_target = QNetwork(envs).to(device)
         target_actor = RiskActor(envs, risk_size).to(device)
         #Risk model
-        risk_model = risk_model_class[args.model_type][args.risk_type](obs_size=np.array(envs.observation_space["observation"].shape).prod(), batch_norm=True, out_size=risk_size)
+        risk_model = risk_model_class[args.model_type][args.risk_type](obs_size=np.array(envs.observation_space["observation"].shape).prod(), batch_norm=True, out_size=risk_size,\
+                                                                        action_size=action_size, model_type="state_action_risk")
         if os.path.exists(args.risk_model_path):
             risk_model.load_state_dict(torch.load(args.risk_model_path, map_location=device))
             print("Pretrained risk model loaded successfully")
@@ -428,7 +418,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             actions = envs.action_space.sample().reshape(1, 3)
         else:
             with torch.no_grad():
-                risk = risk_model(torch.Tensor(obs["observation"]).to(device)) if args.use_risk else None
+                risk = risk_model(torch.Tensor(obs["observation"]).to(device), torch.zeros(action_size).unsqueeze(0).to(device)) if args.use_risk else None
                 actions = actor(convert_dict_to_tensor(obs, device), risk)
                 actions += torch.normal(0, actor.action_scale * args.exploration_noise)
                 actions = actions.cpu().numpy().clip(envs.action_space.low, envs.action_space.high)
@@ -441,13 +431,16 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 f_obs[i] = torch.Tensor(obs["observation"][i]).unsqueeze(0).to(device) if f_obs[i] is None else torch.concat([f_obs[i], torch.Tensor(obs["observation"][i]).unsqueeze(0).to(device)], axis=0)
                 f_next_obs[i] = torch.Tensor(next_obs["observation"][i]).unsqueeze(0).to(device) if f_next_obs[i] is None else torch.concat([f_next_obs[i], torch.Tensor(next_obs["observation"][i]).unsqueeze(0).to(device)], axis=0)
                 f_actions[i] = torch.Tensor(actions[i]).unsqueeze(0).to(device) if f_actions[i] is None else torch.concat([f_actions[i], torch.Tensor(actions[i]).unsqueeze(0).to(device)], axis=0)
+                f_obs[i] = torch.Tensor(next_obs["observation"][i]).unsqueeze(0).to(device) if f_obs[i] is None else torch.concat([f_obs[i], torch.Tensor(next_obs["observation"][i]).unsqueeze(0).to(device)], axis=0)
+                f_actions[i] = torch.concat([f_actions[i], torch.zeros(action_size).unsqueeze(0).to(device)], axis=0)
+
                 # f_rewards[i] = reward[i].unsqueeze(0).to(device) if f_rewards[i] is None else torch.concat([f_rewards[i], reward[i].unsqueeze(0).to(device)], axis=0)
                 # # f_risks = risk_ if f_risks is None else torch.concat([f_risks, risk_], axis=0)
                 # f_costs[i] = cost[i].unsqueeze(0).to(device) if f_costs[i] is None else torch.concat([f_costs[i], cost[i].unsqueeze(0).to(device)], axis=0)
                 # f_dones[i] = next_done[i].unsqueeze(0).to(device) if f_dones[i] is None else torch.concat([f_dones[i], next_done[i].unsqueeze(0).to(device)], axis=0)
 
         if args.fine_tune_risk == "off" and args.use_risk:
-            if args.use_risk and (global_step > args.start_risk_update and args.fine_tune_risk != "None") and global_step % args.risk_update_period == 0:
+            if args.use_risk and (len(risk_rb) > args.start_risk_update and args.fine_tune_risk != "None") and global_step % args.risk_update_period == 0:
                 for epoch in range(args.num_risk_epochs):
                     if args.finetune_risk_online:
                         print("I am online")
@@ -466,7 +459,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 num_successes += int(infos[0]["is_success"])
                 success_rate.append(int(infos[0]["is_success"]))
                 score.append(info["episode"]['r'])
-                print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Replay buffer size = {len(risk_rb)}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 writer.add_scalar("charts/Total Success", num_successes, global_step)
@@ -480,7 +473,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(e_risks, 1)))
                 e_risks = torch.Tensor(e_risks)
 
-                if args.use_risk and args.fine_tune_risk != "None":
+                if args.use_risk and args.fine_tune_risk != "None" and info["cost"]:
                     if args.risk_type == "binary":
                         risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, (e_risks <= args.fear_radius).float(), e_risks.unsqueeze(1))
                     else:
@@ -502,11 +495,14 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if global_step > args.learning_starts:
             data = rb.sample(args.batch_size)
             with torch.no_grad():
-                next_risk = risk_model(data.next_observations["observation"]) if args.use_risk else None
+                next_risk = risk_model(data.next_observations["observation"], torch.zeros_like(data.actions).to(device)) if args.use_risk else None
                 next_state_actions = target_actor(data.next_observations, next_risk)
+                
+                next_risk_q = risk_model(data.next_observations["observation"], next_state_actions) if args.use_risk else None
                 qf1_next_target = qf1_target(data.next_observations, next_state_actions)
                 next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (qf1_next_target).view(-1)
 
+            risk_q = risk_model(data.observations["observation"], data.actions) if args.use_risk else None
             qf1_a_values = qf1(data.observations, data.actions).view(-1)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
 
@@ -517,8 +513,12 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
             if global_step % args.policy_frequency == 0:
                 with torch.no_grad():
-                    risks = risk_model(data.observations["observation"]) if args.use_risk else None
-                actor_loss = -qf1(data.observations, actor(data.observations, risks)).mean()
+                    risks = risk_model(data.observations["observation"], torch.zeros_like(data.actions)) if args.use_risk else None
+                actions = actor(data.observations, risks)
+                with torch.no_grad():
+                    qf1_risk = risk_model(data.observations["observation"], actions) if args.use_risk else None 
+                
+                actor_loss = -qf1(data.observations, actions, qf1_risk).mean()
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
                 actor_optimizer.step()
