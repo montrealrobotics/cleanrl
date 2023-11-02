@@ -708,7 +708,7 @@ def train(cfg):
             done = np.logical_or(terminated, truncated)
 
 
-            rewards -= risk_penalty 
+            reward -= risk_penalty 
             rewards[step] = torch.tensor(reward).to(device).view(-1)
 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'obs': obs} 
