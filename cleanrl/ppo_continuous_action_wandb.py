@@ -812,6 +812,7 @@ def train(cfg):
                 last_step = global_step
                 episode += 1
                 step_log = 0
+                ep_risk_penalty = 0
                 # f_dist_to_fail = torch.Tensor(np.array(list(reversed(range(f_obs.size()[0]))))).to(device) if cost > 0 else torch.Tensor(np.array([f_obs.size()[0]]*f_obs.shape[0])).to(device)
                 e_risks = np.array(list(reversed(range(int(ep_len))))) if cum_cost > 0 else np.array([int(ep_len)]*int(ep_len))
                 # print(risks.size())
