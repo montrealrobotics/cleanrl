@@ -157,6 +157,7 @@ def parse_args():
         help="weight for the 1 class in BCE loss")
     parser.add_argument("--quantile-size", type=int, default=4, help="size of the risk quantile ")
     parser.add_argument("--quantile-num", type=int, default=5, help="number of quantiles to make")
+    parser.add_argument("--risk-penalty", type=float, default=0., help="penalty to impose for entering risky states")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -503,7 +504,7 @@ def get_risk_obs(cfg, next_obs):
 def train(cfg):
     # fmt: on
 
-    risk_bins = np.array([i*cfg.quantile_size for i in range(cfg.quantile_num)])
+    # quantile_means
     cfg.use_risk = False if cfg.risk_model_path == "None" else True 
 
     import wandb 
@@ -527,6 +528,8 @@ def train(cfg):
 
     device = torch.device("cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu")
 
+    risk_bins = np.array([i*cfg.quantile_size for i in range(cfg.quantile_num)])
+    quantile_means = torch.Tensor(np.array([i*(float(cfg.quantile_size/2)) for i in range(1, cfg.quantile_num)] + [np.inf])).to(device)
     # env setup
     envs = gym.vector.SyncVectorEnv(
         [make_env(cfg, i, cfg.capture_video, run_name, cfg.gamma) for i in range(cfg.num_envs)]
@@ -651,7 +654,7 @@ def train(cfg):
     buffer_num = 0
     goal_met = 0;  ep_goal_met = 0
     #update = 0
-    
+    risk_penalty, ep_risk_penalty = 0, 0
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if cfg.anneal_lr:
@@ -682,6 +685,8 @@ def train(cfg):
                     id_risk = int(next_risk[:,0] >= 1 / (cfg.fear_radius + 1))
                     next_risk = torch.zeros_like(next_risk)
                     next_risk[:, id_risk] = 1
+                risk_penalty = torch.sum(torch.div(next_risk, quantile_means) * cfg.risk_penalty)
+                ep_risk_penalty += risk_penalty.item()
                 # print(next_risk)
                 risks[step] = next_risk
                 all_risks[global_step] = next_risk#, axis=-1)
@@ -701,6 +706,9 @@ def train(cfg):
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
+
+
+            rewards -= risk_penalty 
             rewards[step] = torch.tensor(reward).to(device).view(-1)
 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'obs': obs} 
@@ -795,6 +803,7 @@ def train(cfg):
                     cum_risk += ep_risk
                     writer.add_scalar("risk/episodic_risk", ep_risk, global_step)
                     writer.add_scalar("risk/cummulative_risk", cum_risk, global_step)
+                    writer.add_scalar("risk/total_risk_penalty", ep_risk_penalty, global_step)
 
                 writer.add_scalar("Performance/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("Performance/episodic_length", ep_len, global_step)
