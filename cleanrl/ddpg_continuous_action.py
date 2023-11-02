@@ -489,12 +489,13 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                         risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, e_risks_quant, e_risks.unsqueeze(1))
                     f_obs[i], f_next_obs[i], f_actions[i] = None, None, None
 
+                f_risks[i] = e_risks if f_risks[i] is None else torch.concat([f_risks[i], e_risks], axis=0)
                 ## Save all the data
                 if args.collect_data:
-                    torch.save(f_obs, os.path.join(storage_path, "obs.pt"))
-                    torch.save(f_actions, os.path.join(storage_path, "actions.pt"))
-                    torch.save(f_costs, os.path.join(storage_path, "costs.pt"))
-                    torch.save(f_risks, os.path.join(storage_path, "risks.pt"))
+                    torch.save(f_obs[i], os.path.join(storage_path, "obs.pt"))
+                    torch.save(f_actions[i], os.path.join(storage_path, "actions.pt"))
+                    torch.save(f_costs[i], os.path.join(storage_path, "costs.pt"))
+                    torch.save(f_risks[i], os.path.join(storage_path, "risks.pt"))
                     # torch.save(torch.Tensor(f_ep_len), os.path.join(storage_path, "ep_len.pt"))
                     #make_dirs(storage_path, episode)
                 break
