@@ -40,7 +40,7 @@ def parse_args():
         help="the entity (team) of wandb's project")
     parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to capture videos of the agent performances (check out `videos` folder)")
-    parser.add_argument("--save-model", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+    parser.add_argument("--save-model", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="whether to save model into the `runs/{run_name}` folder")
     parser.add_argument("--upload-model", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to upload the saved model to huggingface")
@@ -51,7 +51,9 @@ def parse_args():
     parser.add_argument("--env-id", type=str, default="HalfCheetah-v4",
         help="the id of the environment")
     parser.add_argument("--collect-data", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
-        help="whether to upload the saved model to huggingface")
+        help="store data while trianing")
+    parser.add_argument("--storage-path", type=str, default="./data/ddpg/",
+        help="the storage path for the data collected")
     parser.add_argument("--num-envs", type=int, default=1,
         help="the number of parallel game environments")
     parser.add_argument("--total-timesteps", type=int, default=1000000,
@@ -282,25 +284,24 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 """
         )
     args = parse_args()
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-    if args.track:
-        import wandb
+    # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    # if args.track:
+    import wandb
 
-        wandb.init(
-            project=args.wandb_project_name,
-            entity=args.wandb_entity,
-            sync_tensorboard=True,
-            config=vars(args),
-            name=run_name,
-            monitor_gym=True,
-            save_code=True,
-        )
+    run = wandb.init(
+        project=args.wandb_project_name,
+        entity=args.wandb_entity,
+        sync_tensorboard=True,
+        config=vars(args),
+        monitor_gym=True,
+        save_code=True,
+    )
+    run_name = run.name
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
-
 
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num)])
     args.use_risk = False if args.risk_model_path == "None" else True 
@@ -338,6 +339,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             criterion = nn.NLLLoss(weight=weight_tensor)
         else:
             criterion = nn.BCEWithLogitsLoss(pos_weight=weight_tensor)
+
+
+    if args.collect_data:
+        storage_path = os.path.join(args.storage_path, args.env_id, run_name)
+        make_dirs(storage_path, 0)
 
     action_size = np.prod(envs.action_space.shape)
     if args.use_risk:
@@ -459,7 +465,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 num_successes += int(infos[0]["is_success"])
                 success_rate.append(int(infos[0]["is_success"]))
                 score.append(info["episode"]['r'])
-                print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Replay buffer size = {len(risk_rb)}")
+                if args.fine_tune_risk != "None":
+                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Replay buffer size = {len(risk_rb)}")
+                else:
+                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 writer.add_scalar("charts/Total Success", num_successes, global_step)
@@ -478,7 +487,16 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                         risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, (e_risks <= args.fear_radius).float(), e_risks.unsqueeze(1))
                     else:
                         risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, e_risks_quant, e_risks.unsqueeze(1))
-                f_obs[i], f_next_obs[i], f_actions[i] = None, None, None
+                    f_obs[i], f_next_obs[i], f_actions[i] = None, None, None
+
+                ## Save all the data
+                if args.collect_data:
+                    torch.save(f_obs, os.path.join(storage_path, "obs.pt"))
+                    torch.save(f_actions, os.path.join(storage_path, "actions.pt"))
+                    torch.save(f_costs, os.path.join(storage_path, "costs.pt"))
+                    torch.save(f_risks, os.path.join(storage_path, "risks.pt"))
+                    # torch.save(torch.Tensor(f_ep_len), os.path.join(storage_path, "ep_len.pt"))
+                    #make_dirs(storage_path, episode)
                 break
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
@@ -539,6 +557,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
         torch.save((actor.state_dict(), qf1.state_dict()), model_path)
+        wandb.save(model_path)
         print(f"model saved to {model_path}")
         from cleanrl_utils.evals.ddpg_eval import evaluate
 
