@@ -112,7 +112,7 @@ def parse_args():
         help="fine tune risk by which method")
     parser.add_argument("--finetune-risk-online", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
-    parser.add_argument("--start-risk-update", type=int, default=100,
+    parser.add_argument("--start-risk-update", type=int, default=1000,
         help="number of epochs to update the risk model") 
     parser.add_argument("--rb-type", type=str, default="simple",
         help="which type of replay buffer to use for ")
