@@ -467,6 +467,14 @@ def test_policy(cfg, agent, envs, device, risk_model=None):
             
 def get_risk_obs(cfg, next_obs):
     if cfg.unifying_lidar:
+        if "car" in cfg.risk_model_path.lower():
+            if "point" in cfg.env_id.lower():
+                next_risk_obs = torch.zeros((next_obs.size()[0], 120)).to(cfg.device)
+                other_crap = torch.Tensor([[0, 0, 0, 1., 0., 0., 0., 1., 0., 0., 0., 1.]]*next_obs.shape[0]).to(cfg.device)
+                next_risk_obs[:, list(range(12))] = next_obs[:, list(range(12))]
+                next_risk_obs[:, list(range(12,24))] = other_crap
+                next_risk_obs[:, list(range(24, 120))] = next_obs[:, list(range(12, 108))]
+                return next_risk_obs 
         return next_obs
     if "goal" in cfg.risk_model_path.lower():
         if "push" in cfg.env_id.lower():
@@ -527,7 +535,7 @@ def train(cfg):
     torch.backends.cudnn.deterministic = cfg.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu")
-
+    cfg.device = device
     risk_bins = np.array([i*cfg.quantile_size for i in range(cfg.quantile_num)])
     quantile_means = torch.Tensor(np.array([((i+0.5)*(float(cfg.quantile_size)))**(i+1) for i in range(cfg.quantile_num-1)] + [np.inf])).to(device)
     # env setup
@@ -557,12 +565,14 @@ def train(cfg):
         else:
             criterion = nn.BCEWithLogitsLoss(pos_weight=weight_tensor)
 
-    if "goal" in cfg.risk_model_path.lower():
-        risk_obs_size = 72 
-    elif cfg.risk_model_path == "scratch":
+    if cfg.risk_model_path == "scratch":
         risk_obs_size = np.array(envs.single_observation_space.shape).prod()
     else:
-        risk_obs_size = 88
+        if "car" in cfg.risk_model_path.lower():
+            risk_obs_size = 120
+        elif "point" in cfg.risk_model_path.lower():
+            risk_obs_size = 108 
+    
 
     if cfg.use_risk:
         print("using risk")
@@ -570,7 +580,7 @@ def train(cfg):
         agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
         #else:
         #    agent = ContRiskAgent(envs=envs).to(device)
-        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=True, out_size=risk_size)
+        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=risk_obs_size, batch_norm=True, out_size=risk_size)
         if os.path.exists(cfg.risk_model_path):
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             print("Pretrained risk model loaded successfully")
