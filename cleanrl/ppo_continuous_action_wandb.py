@@ -674,7 +674,6 @@ def train(cfg):
                 with torch.no_grad():
                     next_obs_risk = get_risk_obs(cfg, next_obs)
                     next_risk = torch.Tensor(risk_model(next_obs_risk.to(device))).to(device)
-                    print(torch.min(next_risk))
                     if cfg.risk_type == "continuous":
                         next_risk = next_risk.unsqueeze(0)
                 #print(next_risk.size())
@@ -686,11 +685,11 @@ def train(cfg):
                     id_risk = int(next_risk[:,0] >= 1 / (cfg.fear_radius + 1))
                     next_risk = torch.zeros_like(next_risk)
                     next_risk[:, id_risk] = 1
-                risk_penalty = torch.sum(torch.div(next_risk, quantile_means) * cfg.risk_penalty)
+                risk_penalty = torch.sum(torch.div(torch.exp(next_risk), quantile_means) * cfg.risk_penalty)
                 ep_risk_penalty += risk_penalty.item()
                 # print(next_risk)
-                risks[step] = next_risk
-                all_risks[global_step] = next_risk#, axis=-1)
+                risks[step] = torch.exp(next_risk)
+                all_risks[global_step] = torch.exp(next_risk)#, axis=-1)
 
 
             # ALGO LOGIC: action logic
@@ -799,7 +798,7 @@ def train(cfg):
                 wandb.save("policy.pt")
                 print(f"cummulative_cost={cum_cost}, global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
                 if cfg.use_risk:
-                    ep_risk = torch.sum(all_risks[last_step:global_step]).item()
+                    ep_risk = torch.sum(all_risks.squeeze()[last_step:global_step, 0]).item()
                     cum_risk += ep_risk
                     writer.add_scalar("risk/episodic_risk", ep_risk, global_step)
                     writer.add_scalar("risk/cummulative_risk", cum_risk, global_step)
