@@ -529,7 +529,7 @@ def train(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu")
 
     risk_bins = np.array([i*cfg.quantile_size for i in range(cfg.quantile_num)])
-    quantile_means = torch.Tensor(np.array([i*(float(cfg.quantile_size/2)) for i in range(1, cfg.quantile_num)] + [np.inf])).to(device)
+    quantile_means = torch.Tensor(np.array([((i+0.5)*(float(cfg.quantile_size)))**(i+1) for i in range(cfg.quantile_num-1)] + [np.inf])).to(device)
     # env setup
     envs = gym.vector.SyncVectorEnv(
         [make_env(cfg, i, cfg.capture_video, run_name, cfg.gamma) for i in range(cfg.num_envs)]
@@ -674,6 +674,7 @@ def train(cfg):
                 with torch.no_grad():
                     next_obs_risk = get_risk_obs(cfg, next_obs)
                     next_risk = torch.Tensor(risk_model(next_obs_risk.to(device))).to(device)
+                    print(torch.min(next_risk))
                     if cfg.risk_type == "continuous":
                         next_risk = next_risk.unsqueeze(0)
                 #print(next_risk.size())
