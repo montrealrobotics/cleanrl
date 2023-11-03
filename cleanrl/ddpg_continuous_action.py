@@ -40,7 +40,7 @@ def parse_args():
         help="the entity (team) of wandb's project")
     parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to capture videos of the agent performances (check out `videos` folder)")
-    parser.add_argument("--save-model", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+    parser.add_argument("--save-model", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to save model into the `runs/{run_name}` folder")
     parser.add_argument("--upload-model", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to upload the saved model to huggingface")
@@ -100,7 +100,7 @@ def parse_args():
         help="fear radius for training the risk model")
     parser.add_argument("--num-risk-datapoints", type=int, default=1000,
         help="fear radius for training the risk model")
-    parser.add_argument("--risk-update-period", type=int, default=1000,
+    parser.add_argument("--risk-update-period", type=int, default=100,
         help="how frequently to update the risk model")
     parser.add_argument("--num-risk-epochs", type=int, default=1,
         help="number of sgd steps to update the risk model")
@@ -446,7 +446,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 # f_dones[i] = next_done[i].unsqueeze(0).to(device) if f_dones[i] is None else torch.concat([f_dones[i], next_done[i].unsqueeze(0).to(device)], axis=0)
 
         if args.fine_tune_risk == "off" and args.use_risk:
-            if args.use_risk and (len(risk_rb) > args.start_risk_update and args.fine_tune_risk != "None") and global_step % args.risk_update_period == 0:
+            if args.use_risk and (len(risk_rb) > args.start_risk_update and args.fine_tune_risk != "None") and total_cost % args.risk_update_period == 0:
                 for epoch in range(args.num_risk_epochs):
                     if args.finetune_risk_online:
                         print("I am online")
@@ -466,7 +466,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 success_rate.append(int(infos[0]["is_success"]))
                 score.append(info["episode"]['r'])
                 if args.fine_tune_risk != "None":
-                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Replay buffer size = {len(risk_rb)}")
+                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Replay buffer size = {len(risk_rb)}, Total cost={total_cost}")
                 else:
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
@@ -477,7 +477,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("cost/ep_cost", info["cost"], global_step)
                 writer.add_scalar("cost/total_cost", total_cost, global_step)
 
-                e_risks = np.array(list(reversed(range(int(ep_len))))) if info["cost"] > 0 else np.array([int(ep_len)]*int(ep_len))
+                e_risks = torch.Tensor(np.array(list(reversed(range(int(ep_len))))) if info["cost"] > 0 else np.array([int(ep_len)]*int(ep_len))).repeat_interleave(2).numpy()
                 # print(risks.size())
                 e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(e_risks, 1)))
                 e_risks = torch.Tensor(e_risks)
@@ -487,7 +487,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                         risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, (e_risks <= args.fear_radius).float(), e_risks.unsqueeze(1))
                     else:
                         risk_rb.add(f_obs[i], f_next_obs[i], f_actions[i], None, None, None, e_risks_quant, e_risks.unsqueeze(1))
-                    f_obs[i], f_next_obs[i], f_actions[i] = None, None, None
+                f_obs[i], f_next_obs[i], f_actions[i] = None, None, None
 
                 f_risks[i] = e_risks if f_risks[i] is None else torch.concat([f_risks[i], e_risks], axis=0)
                 ## Save all the data
