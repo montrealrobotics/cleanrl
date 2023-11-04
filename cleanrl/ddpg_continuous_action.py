@@ -462,8 +462,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             if 'episode' in info.keys():
                 ep_len = info["episode"]["l"]
                 total_cost += infos[0]["cost"]
-                num_successes += int(infos[0]["is_success"])
-                success_rate.append(int(infos[0]["is_success"]))
+                num_successes += int(infos[0]["cum_goal_met"])
+                success_rate.append(int(infos[0]["cum_goal_met"]))
                 score.append(info["episode"]['r'])
                 if args.fine_tune_risk != "None":
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Replay buffer size = {len(risk_rb)}, Total cost={total_cost}")
