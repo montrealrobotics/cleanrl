@@ -123,11 +123,11 @@ def parse_args():
         help="the id of the environment")
     parser.add_argument("--binary-risk", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Use risk model in the critic or not ")
-    parser.add_argument("--model-type", type=str, default="mlp",
+    parser.add_argument("--model-type", type=str, default="bayesian",
         help="specify the NN to use for the risk model")
     parser.add_argument("--risk-bnorm", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
-    parser.add_argument("--risk-type", type=str, default="binary",
+    parser.add_argument("--risk-type", type=str, default="quantile",
         help="whether the risk is binary or continuous")
     parser.add_argument("--fear-radius", type=int, default=5,
         help="fear radius for training the risk model")
@@ -149,7 +149,7 @@ def parse_args():
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--start-risk-update", type=int, default=10000,
         help="number of epochs to update the risk model") 
-    parser.add_argument("--rb-type", type=str, default="balanced",
+    parser.add_argument("--rb-type", type=str, default="simple",
         help="which type of replay buffer to use for ")
     parser.add_argument("--freeze-risk-layers", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
