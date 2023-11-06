@@ -466,7 +466,7 @@ def test_policy(cfg, agent, envs, device, risk_model=None):
             
 def get_risk_obs(cfg, next_obs):
     if cfg.unifying_lidar:
-        return next_obs
+        return next_obs[:, -96:]
     if "goal" in cfg.risk_model_path.lower():
         if "push" in cfg.env_id.lower():
             #print("push")
@@ -567,7 +567,7 @@ def train(cfg):
         agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
         #else:
         #    agent = ContRiskAgent(envs=envs).to(device)
-        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=risk_obs_size, batch_norm=True, out_size=risk_size)
+        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=96, batch_norm=True, out_size=risk_size)
         if os.path.exists(cfg.risk_model_path):
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             print("Pretrained risk model loaded successfully")
@@ -670,7 +670,7 @@ def train(cfg):
             if cfg.use_risk:
                 with torch.no_grad():
                     next_obs_risk = get_risk_obs(cfg, next_obs)
-                    next_risk = torch.Tensor(risk_model(next_obs_risk.to(device))).to(device)
+                    next_risk = torch.exp(torch.Tensor(risk_model(next_obs_risk.to(device))).to(device))
                     if cfg.risk_type == "continuous":
                         next_risk = next_risk.unsqueeze(0)
                 #print(next_risk.size())
@@ -791,7 +791,7 @@ def train(cfg):
                 wandb.save("policy.pt")
                 print(f"cummulative_cost={cum_cost}, global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
                 if cfg.use_risk:
-                    ep_risk = torch.sum(all_risks[last_step:global_step]).item()
+                    ep_risk = torch.sum(all_risks.squeeze()[last_step:global_step, 0]).item()
                     cum_risk += ep_risk
                     writer.add_scalar("risk/episodic_risk", ep_risk, global_step)
                     writer.add_scalar("risk/cummulative_risk", cum_risk, global_step)
