@@ -688,7 +688,7 @@ def train(cfg):
                     next_risk[:, id_risk] = 1
                 
                 risk_prob = torch.exp(next_risk)
-                if cfg.risk_model_path == "scratch" and total_risk_updates < cfg.risk_penalty_start:
+                if total_risk_updates < cfg.risk_penalty_start:
                     risk_penalty = torch.Tensor([0.]).to(device)
                 else:
                     risk_penalty = torch.sum(torch.div(risk_prob*cfg.risk_penalty, quantile_means)) 
@@ -806,8 +806,8 @@ def train(cfg):
                     cum_risk += ep_risk
                     writer.add_scalar("risk/episodic_risk", ep_risk, global_step)
                     writer.add_scalar("risk/cummulative_risk", cum_risk, global_step)
-                    writer.add_scalar("risk/risk-penalty", np.mean(f_risk_penalty), global_step)
-                    print(total_risk_updates, np.mean(f_risk_penalty))
+                    writer.add_scalar("risk/risk-penalty", np.sum(f_risk_penalty), global_step)
+                    print(total_risk_updates, np.sum(f_risk_penalty))
                     f_risk_penalty = []
                 
                 writer.add_scalar("Performance/episodic_return", info["episode"]["r"], global_step)
