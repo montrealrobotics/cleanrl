@@ -530,7 +530,7 @@ def train(cfg):
     torch.backends.cudnn.deterministic = cfg.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu")
-    quantile_means = torch.Tensor(np.array([((i+0.5)*(float(cfg.quantile_size)))**(2) for i in range(cfg.quantile_num-1)] + [np.inf])).to(device)
+    quantile_means = torch.Tensor(np.array([((i+0.5)*(float(cfg.quantile_size)))**(i+1) for i in range(cfg.quantile_num-1)] + [np.inf])).to(device)
     # env setup
     envs = gym.vector.SyncVectorEnv(
         [make_env(cfg, i, cfg.capture_video, run_name, cfg.gamma) for i in range(cfg.num_envs)]
