@@ -155,6 +155,10 @@ def parse_args():
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--weight", type=float, default=1.0, 
         help="weight for the 1 class in BCE loss")
+    parser.add_argument("--risk-penalty", type=float, default=0.0, 
+        help="risk penalty to discourage risky state visitation")
+    parser.add_argument("--risk-penalty-start", type=float, default=100, 
+        help="risk penalty to discourage risky state visitation")
     parser.add_argument("--quantile-size", type=int, default=4, help="size of the risk quantile ")
     parser.add_argument("--quantile-num", type=int, default=5, help="number of quantiles to make")
     args = parser.parse_args()
@@ -526,7 +530,7 @@ def train(cfg):
     torch.backends.cudnn.deterministic = cfg.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu")
-
+    quantile_means = torch.Tensor(np.array([((i+0.5)*(float(cfg.quantile_size)))**(2) for i in range(cfg.quantile_num-1)] + [np.inf])).to(device)
     # env setup
     envs = gym.vector.SyncVectorEnv(
         [make_env(cfg, i, cfg.capture_video, run_name, cfg.gamma) for i in range(cfg.num_envs)]
@@ -650,8 +654,8 @@ def train(cfg):
 
     buffer_num = 0
     goal_met = 0;  ep_goal_met = 0
-    #update = 0
-    
+    total_risk_updates = 0
+    f_risk_penalty = []
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if cfg.anneal_lr:
@@ -670,7 +674,7 @@ def train(cfg):
             if cfg.use_risk:
                 with torch.no_grad():
                     next_obs_risk = get_risk_obs(cfg, next_obs)
-                    next_risk = torch.exp(torch.Tensor(risk_model(next_obs_risk.to(device))).to(device))
+                    next_risk = torch.Tensor(risk_model(next_obs_risk.to(device))).to(device)
                     if cfg.risk_type == "continuous":
                         next_risk = next_risk.unsqueeze(0)
                 #print(next_risk.size())
@@ -682,9 +686,16 @@ def train(cfg):
                     id_risk = int(next_risk[:,0] >= 1 / (cfg.fear_radius + 1))
                     next_risk = torch.zeros_like(next_risk)
                     next_risk[:, id_risk] = 1
+                
+                risk_prob = torch.exp(next_risk)
+                if cfg.risk_model_path == "scratch" and total_risk_updates < cfg.risk_penalty_start:
+                    risk_penalty = torch.Tensor([0.]).to(device)
+                else:
+                    risk_penalty = torch.sum(torch.div(risk_prob*cfg.risk_penalty, quantile_means)) 
+                f_risk_penalty.append(risk_penalty.item())
                 # print(next_risk)
                 risks[step] = next_risk
-                all_risks[global_step] = next_risk#, axis=-1)
+                all_risks[global_step] = risk_prob#, axis=-1)
 
 
             # ALGO LOGIC: action logic
@@ -701,7 +712,7 @@ def train(cfg):
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
-            rewards[step] = torch.tensor(reward).to(device).view(-1)
+            rewards[step] = torch.tensor(reward).to(device).view(-1) - risk_penalty
 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'obs': obs} 
             # if cfg.collect_data:
@@ -754,6 +765,7 @@ def train(cfg):
             elif cfg.fine_tune_risk == "off" and cfg.use_risk:
                 if cfg.use_risk and (global_step > cfg.start_risk_update and cfg.fine_tune_risk) and global_step % cfg.risk_update_period == 0:
                     for epoch in range(cfg.num_risk_epochs):
+                        total_risk_updates += 1
                         if cfg.finetune_risk_online:
                             print("I am online")
                             data = rb.slice_data(-cfg.risk_batch_size*cfg.num_update_risk, 0)
@@ -783,7 +795,6 @@ def train(cfg):
                 writer.add_scalar("goals/Avg Ep Goal", np.mean(goal_scores[-100:]))
                 writer.add_scalar("goals/Total Goal Achieved", goal_met, global_step)
                 ep_goal_met = 0
-                
                 #avg_total_reward = np.mean(test_policy(cfg, agent, envs, device=device, risk_model=risk_model))
                 avg_mean_score = np.mean(scores[-100:])
                 writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
@@ -795,7 +806,10 @@ def train(cfg):
                     cum_risk += ep_risk
                     writer.add_scalar("risk/episodic_risk", ep_risk, global_step)
                     writer.add_scalar("risk/cummulative_risk", cum_risk, global_step)
-
+                    writer.add_scalar("risk/risk-penalty", np.mean(f_risk_penalty), global_step)
+                    print(total_risk_updates, np.mean(f_risk_penalty))
+                    f_risk_penalty = []
+                
                 writer.add_scalar("Performance/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("Performance/episodic_length", ep_len, global_step)
                 writer.add_scalar("Performance/episodic_cost", ep_cost, global_step)
