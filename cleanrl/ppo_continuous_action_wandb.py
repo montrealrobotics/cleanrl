@@ -656,6 +656,7 @@ def train(cfg):
     goal_met = 0;  ep_goal_met = 0
     total_risk_updates = 0
     f_risk_penalty = []
+    risk_penalty = torch.Tensor([0.]).to(device)
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if cfg.anneal_lr:
