@@ -420,11 +420,12 @@ def train_risk(cfg, model, data, criterion, opt, device):
     dataloader = DataLoader(dataset, batch_size=cfg.risk_batch_size, shuffle=True, num_workers=10, generator=torch.Generator(device='cpu'))
     net_loss = 0
     for batch in dataloader:
-        pred = model(get_risk_obs(cfg, batch[0]).to(device))
+        X, y = batch[0], batch[1]
+        pred = model(get_risk_obs(cfg, X).to(device))
         if cfg.model_type == "mlp":
-            loss = criterion(pred, batch[1].squeeze().to(device))
+            loss = criterion(pred, y.squeeze().to(device))
         else:
-            loss = criterion(pred, torch.argmax(batch[1].squeeze(), axis=1).to(device))
+            loss = criterion(pred, torch.argmax(y.squeeze(), axis=1).to(device))
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -470,7 +471,7 @@ def test_policy(cfg, agent, envs, device, risk_model=None):
             
 def get_risk_obs(cfg, next_obs):
     if cfg.unifying_lidar:
-        return next_obs[:, -96:]
+        return next_obs
     if "goal" in cfg.risk_model_path.lower():
         if "push" in cfg.env_id.lower():
             #print("push")
@@ -571,7 +572,7 @@ def train(cfg):
         agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
         #else:
         #    agent = ContRiskAgent(envs=envs).to(device)
-        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=96, batch_norm=True, out_size=risk_size)
+        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=120, batch_norm=True, out_size=risk_size)
         if os.path.exists(cfg.risk_model_path):
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             print("Pretrained risk model loaded successfully")
@@ -765,8 +766,8 @@ def train(cfg):
                     writer.add_scalar("risk/risk_loss", risk_loss, global_step)
             elif cfg.fine_tune_risk == "off" and cfg.use_risk:
                 if cfg.use_risk and (global_step > cfg.start_risk_update and cfg.fine_tune_risk) and global_step % cfg.risk_update_period == 0:
-                    num_risk_epochs = 100 if total_risk_updates == 0 else cfg.num_risk_epochs
-                    for epoch in range(num_risk_epochs):
+                    #num_risk_epochs = 100 if total_risk_updates == 0 else cfg.num_risk_epochs
+                    for epoch in range(cfg.num_risk_epochs):
                         total_risk_updates += 1
                         if cfg.finetune_risk_online:
                             print("I am online")
