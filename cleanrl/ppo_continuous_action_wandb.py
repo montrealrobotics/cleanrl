@@ -765,7 +765,8 @@ def train(cfg):
                     writer.add_scalar("risk/risk_loss", risk_loss, global_step)
             elif cfg.fine_tune_risk == "off" and cfg.use_risk:
                 if cfg.use_risk and (global_step > cfg.start_risk_update and cfg.fine_tune_risk) and global_step % cfg.risk_update_period == 0:
-                    for epoch in range(cfg.num_risk_epochs):
+                    num_risk_epochs = 100 if total_risk_updates == 0 else cfg.num_risk_epochs
+                    for epoch in range(num_risk_epochs):
                         total_risk_updates += 1
                         if cfg.finetune_risk_online:
                             print("I am online")
@@ -831,7 +832,8 @@ def train(cfg):
                 elif cfg.collect_data:
                     f_risks = e_risks.unsqueeze(1) if f_risks is None else torch.concat([f_risks, e_risks.unsqueeze(1)], axis=0)
 
-                if cfg.fine_tune_risk in ["off", "sync"] and cfg.use_risk:
+                
+                if cfg.fine_tune_risk in ["off", "sync"] and cfg.use_risk and cum_cost > 0:
                     f_dist_to_fail = e_risks
                     if cfg.rb_type == "balanced":
                         idx_risky = (f_dist_to_fail<=cfg.fear_radius)
@@ -859,6 +861,8 @@ def train(cfg):
                     f_rewards[i] = None
                     f_dones[i] = None
                     f_costs[i] = None
+                else:
+                    f_obs[i], f_next_obs[i], f_risks, f_actions[i], f_rewards[i], f_dones[i], f_costs[i] = None, None, None, None, None, None, None
 
                 ## Save all the data
                 if cfg.collect_data:
