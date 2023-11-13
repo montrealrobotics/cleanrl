@@ -393,6 +393,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         envs,
         device,
         handle_timeout_termination=False,
+        goal_selection_strategy="future",
     )
     # print(envs.observation_space, envs.action_space)
     # rb = ReplayBuffer(
@@ -461,20 +462,20 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         for i, info in enumerate(infos):
             if 'episode' in info.keys():
                 ep_len = info["episode"]["l"]
-                total_cost += infos[0]["cost"]
-                num_successes += int(infos[0]["cum_goal_met"])
-                success_rate.append(int(infos[0]["cum_goal_met"]))
+                total_cost += infos[0]["cum_cost"]
+                # num_successes += int(infos[0]["cum_goal_met"])
+                success_rate.append(int(infos[0]["is_success"]))
                 score.append(info["episode"]['r'])
                 if args.fine_tune_risk != "None":
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Replay buffer size = {len(risk_rb)}, Total cost={total_cost}")
                 else:
-                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Ep Cost = {info['cum_cost']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 writer.add_scalar("charts/Total Success", num_successes, global_step)
                 writer.add_scalar("charts/Success rate", np.mean(success_rate[-100:]), global_step)
                 writer.add_scalar("charts/Avg. Return", np.mean(score[-100:]), global_step)
-                writer.add_scalar("cost/ep_cost", info["cost"], global_step)
+                writer.add_scalar("cost/ep_cost", info["cum_cost"], global_step)
                 writer.add_scalar("cost/total_cost", total_cost, global_step)
 
                 e_risks = torch.Tensor(np.array(list(reversed(range(int(ep_len))))) if info["cost"] > 0 else np.array([int(ep_len)]*int(ep_len))).repeat_interleave(2).numpy()
