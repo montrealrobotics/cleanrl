@@ -310,7 +310,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
-
+    torch.set_num_threads(4)
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
@@ -467,9 +467,9 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 success_rate.append(int(infos[0]["is_success"]))
                 score.append(info["episode"]['r'])
                 if args.fine_tune_risk != "None":
-                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Replay buffer size = {len(risk_rb)}, Total cost={total_cost}")
+                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Replay buffer size = {len(risk_rb)}, Total cost={total_cost}, Success Rate={np.mean(success_rate[-100:])}")
                 else:
-                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Ep Cost = {info['cum_cost']}")
+                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}, Ep Cost = {info['cost']}, Success Rate={np.mean(success_rate[-100:])}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 writer.add_scalar("charts/Total Success", num_successes, global_step)
