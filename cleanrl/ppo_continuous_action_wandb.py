@@ -5,7 +5,7 @@ import random
 import time
 from distutils.util import strtobool
 
-import safety_gymnasium
+# import safety_gymnasium
 import panda_gym 
 import gymnasium as gym
 import numpy as np
