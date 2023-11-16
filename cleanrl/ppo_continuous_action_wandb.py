@@ -376,7 +376,7 @@ def fine_tune_risk(cfg, model, inputs, targets, opt, device):
         else:
             criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([1, weight]).to(device))
 
-        dataloader = DataLoader(dataset, batch_size=cfg.risk_batch_size, shuffle=True, num_workers=10, generator=torch.Generator(device=device))
+        dataloader = DataLoader(dataset, batch_size=cfg.risk_batch_size, shuffle=True)
         for epoch in range(cfg.risk_epochs):
             net_loss = 0
             for batch in dataloader:
@@ -516,6 +516,8 @@ def train(cfg):
                    project="risk_aware_exploration",
                    monitor_gym=True,
                    sync_tensorboard=True, save_code=True)
+    
+    torch.set_num_threads(4)
 
     #run_name = "something"
     run_name = run.name
@@ -690,7 +692,7 @@ def train(cfg):
                     next_risk[:, id_risk] = 1
                 
                 risk_prob = torch.exp(next_risk)
-                if total_risk_updates < cfg.risk_penalty_start:
+                if global_step < cfg.risk_penalty_start:
                     risk_penalty = torch.Tensor([0.]).to(device)
                 else:
                     risk_penalty = torch.sum(torch.div(risk_prob*cfg.risk_penalty, quantile_means)) 
