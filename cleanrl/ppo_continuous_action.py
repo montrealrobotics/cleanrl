@@ -5,7 +5,8 @@ import random
 import time
 from distutils.util import strtobool
 
-import safety_gymnasium
+# import safety_gymnasium
+import panda_gym
 import gymnasium as gym
 import numpy as np
 import torch
@@ -25,9 +26,9 @@ import os
 def make_env(cfg, idx, capture_video, run_name, gamma):
     def thunk():
         if capture_video:
-            env = gym.make(cfg.env.env_id, render_mode="rgb_array", early_termination=cfg.env.early_termination, term_cost=cfg.env.term_cost)
+            env = gym.make(cfg.env.env_id, render_mode="rgb_array")
         else:
-            env = gym.make(cfg.env.env_id, early_termination=cfg.env.early_termination, term_cost=cfg.env.term_cost)
+            env = gym.make(cfg.env.env_id, reward_type="dense")
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
