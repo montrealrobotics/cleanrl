@@ -50,6 +50,8 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="HalfCheetah-v4",
         help="the id of the environment")
+    parser.add_argument("--use-safety-info", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="store data while trianing")
     parser.add_argument("--collect-data", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="store data while trianing")
     parser.add_argument("--storage-path", type=str, default="./data/ddpg/",
@@ -132,12 +134,12 @@ def parse_args():
     return args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def make_env(env_id, seed, idx, capture_video, run_name, safety_info):
     def thunk():
         if capture_video:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.make(env_id, render_mode="rgb_array", safety_info=safety_info)
         else:
-            env = gym.make(env_id)
+            env = gym.make(env_id, safety_info=safety_info)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
             if idx == 0:
@@ -293,7 +295,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = DummyVecEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    envs = DummyVecEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name, args.use_safety_info)])
 
     # envs = gym.wrappers.RecordEpisodeStatistics(gym.make(args.env_id)) #SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
     assert isinstance(envs.action_space, gym.spaces.Box), "only continuous action space is supported"
