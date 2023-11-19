@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from stable_baselines3.common.buffers import ReplayBuffer
+from stable_baselines3.common.buffers import ReplayBuffer, DictReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -78,7 +78,7 @@ def parse_args():
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
-        env = gym.make(env_id)
+        env = gym.make(env_id, reward_type="dense")
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
             if idx == 0:
@@ -221,21 +221,21 @@ if __name__ == "__main__":
         alpha = args.alpha
 
     envs.observation_space.dtype = np.float32
-    # rb = ReplayBuffer(
-    #     args.buffer_size,
-    #     envs.observation_space-,
-    #     envs.action_space,
-    #     device,
-    #     handle_timeout_termination=True,
-    # )
-    rb = HerReplayBuffer(
+    rb = DictReplayBuffer(
         args.buffer_size,
         envs.observation_space,
         envs.action_space,
-        envs,
         device,
-        handle_timeout_termination=False,
+        handle_timeout_termination=True,
     )
+    # rb = HerReplayBuffer(
+    #     args.buffer_size,
+    #     envs.observation_space,
+    #     envs.action_space,
+    #     envs,
+    #     device,
+    #     handle_timeout_termination=False,
+    # )
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
