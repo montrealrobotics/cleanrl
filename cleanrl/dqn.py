@@ -357,6 +357,9 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 loss.backward()
                 optimizer.step()
 
+
+            torch.save(q_network.state_dict(), os.path.join(wandb.run.dir, "qnet.pt"))
+            wandb.save("qnet.pt")
             ## Update Risk Network 
             if args.use_risk and args.fine_tune_risk != "None" and global_step % args.risk_update_period == 0:
                 risk_model.train()
@@ -368,7 +371,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 opt_risk.step()
                 risk_model.eval()
                 writer.add_scalar("charts/risk_loss", risk_loss.item(), global_step)
-            
+                torch.save(risk_model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
+                wandb.save("risk_model.pt")
 
             # update target network
             if global_step % args.target_network_frequency == 0:
