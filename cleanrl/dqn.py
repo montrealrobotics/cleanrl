@@ -205,7 +205,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    # torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     args.use_risk = False if args.risk_model_path == "None" else True 
@@ -220,7 +220,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                         "mlp": {"continuous": RiskEst, "binary": RiskEst}} 
 
     risk_size_dict = {"continuous": 1, "binary": 2, "quantile": args.quantile_num}
-    risk_size = risk_size_dict[args.risk_type]
+    risk_size = risk_size_dict[args.risk_type] if args.use_risk else 0
     risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num)])
 
     if args.use_risk:
@@ -287,7 +287,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminated, truncated, infos = envs.step(actions)
         cost = int(terminated) and (rewards == 0)
-        if (args.fine_tune_risk != "None" and args.use_risk) or args.collect_data:
+        if (args.fine_tune_risk != "None" and args.use_risk):
             for i in range(args.num_envs):
                 f_obs[i] = torch.Tensor(obs["image"][i]).reshape(1, -1).to(device) if f_obs[i] is None else torch.concat([f_obs[i], torch.Tensor(obs["image"][i]).reshape(1, -1).to(device)], axis=0)
                 f_next_obs[i] = torch.Tensor(next_obs["image"][i]).reshape(1, -1).to(device) if f_next_obs[i] is None else torch.concat([f_next_obs[i], torch.Tensor(next_obs["image"][i]).reshape(1, -1).to(device)], axis=0)
