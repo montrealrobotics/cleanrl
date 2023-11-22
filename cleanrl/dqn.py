@@ -50,7 +50,7 @@ def parse_args():
         help="the learning rate of the optimizer")
     parser.add_argument("--num-envs", type=int, default=1,
         help="the number of parallel game environments")
-    parser.add_argument("--buffer-size", type=int, default=10000,
+    parser.add_argument("--buffer-size", type=int, default=500000,
         help="the replay memory buffer size")
     parser.add_argument("--gamma", type=float, default=0.99,
         help="the discount factor gamma")
@@ -176,6 +176,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     obs, _ = envs.reset(seed=args.seed)
     obs = obs
     total_cost = 0
+    scores = []
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
@@ -187,15 +188,20 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminated, truncated, infos = envs.step(actions)
-        total_cost += int(terminated)
+        cost = int(terminated) and (rewards == 0)
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
                 # Skip the envs that are not done
                 if "episode" not in info:
                     continue
+                total_cost += cost
+                scores.append(info['episode']['r'])
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}, total cost={total_cost}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                writer.add_scalar("charts/Avg Return", np.mean(scores[-100:]), global_step)
+                writer.add_scalar("charts/total_cost", total_cost, global_step)
+                writer.add_scalar("charts/episodic_cost",   cost, global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 writer.add_scalar("charts/epsilon", epsilon, global_step)
 
