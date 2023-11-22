@@ -97,7 +97,7 @@ class QNetwork(nn.Module):
     def __init__(self, env):
         super().__init__()
         self.network = nn.Sequential(
-            nn.Linear(np.array(env.single_observation_space.shape).prod(), 120),
+            nn.Linear(np.array(env.single_observation_space["image"].shape).prod(), 120),
             nn.ReLU(),
             nn.Linear(120, 84),
             nn.ReLU(),
@@ -148,6 +148,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
@@ -164,7 +165,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     rb = ReplayBuffer(
         args.buffer_size,
-        envs.single_observation_space,
+        envs.single_observation_space["image"],
         envs.single_action_space,
         device,
         handle_timeout_termination=False,
@@ -173,25 +174,27 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
+    obs = obs
+    total_cost = 0
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
         if random.random() < epsilon:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
-            q_values = q_network(torch.Tensor(obs).to(device))
+            q_values = q_network(torch.Tensor(obs["image"]).reshape(args.num_envs, -1).to(device))
             actions = torch.argmax(q_values, dim=1).cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminated, truncated, infos = envs.step(actions)
-
+        total_cost += int(terminated)
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
                 # Skip the envs that are not done
                 if "episode" not in info:
                     continue
-                print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                print(f"global_step={global_step}, episodic_return={info['episode']['r']}, total cost={total_cost}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 writer.add_scalar("charts/epsilon", epsilon, global_step)
@@ -201,7 +204,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         for idx, d in enumerate(truncated):
             if d:
                 real_next_obs[idx] = infos["final_observation"][idx]
-        rb.add(obs, real_next_obs, actions, rewards, terminated, infos)
+        rb.add(obs["image"], real_next_obs["image"], actions, rewards, terminated, infos)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
@@ -211,9 +214,9 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
                 with torch.no_grad():
-                    target_max, _ = target_network(data.next_observations).max(dim=1)
+                    target_max, _ = target_network(data.next_observations.reshape(args.batch_size, -1).float()).max(dim=1)
                     td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
-                old_val = q_network(data.observations).gather(1, data.actions).squeeze()
+                old_val = q_network(data.observations.reshape(args.batch_size, -1).float()).gather(1, data.actions).squeeze()
                 loss = F.mse_loss(td_target, old_val)
 
                 if global_step % 100 == 0:
