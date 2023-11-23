@@ -295,6 +295,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminated, truncated, infos = envs.step(actions)
         cost = int(terminated) and (rewards == 0)
+        goal = int(terminated) and (rewards > 0)
+        total_goals += goal
         if (args.fine_tune_risk != "None" and args.use_risk):
             for i in range(args.num_envs):
                 f_obs[i] = torch.Tensor(obs["image"][i]).reshape(1, -1).to(device) if f_obs[i] is None else torch.concat([f_obs[i], torch.Tensor(obs["image"][i]).reshape(1, -1).to(device)], axis=0)
@@ -313,7 +315,6 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                     continue
                 total_cost += cost
                 ep_len = info["episode"]["l"]
-
                 if args.use_risk and args.fine_tune_risk != "None":
                     e_risks = np.array(list(reversed(range(int(ep_len))))) if cost > 0 else np.array([int(ep_len)]*int(ep_len))
                     e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(e_risks, 1)))
@@ -327,6 +328,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 scores.append(info['episode']['r'])
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}, total cost={total_cost}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                writer.add_scalar("charts/Total Goals", total_goals, global_step)
                 writer.add_scalar("charts/Avg Return", np.mean(scores[-100:]), global_step)
                 writer.add_scalar("charts/total_cost", total_cost, global_step)
                 writer.add_scalar("charts/episodic_cost",   cost, global_step)
