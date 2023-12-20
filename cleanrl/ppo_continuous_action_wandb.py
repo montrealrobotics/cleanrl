@@ -416,30 +416,6 @@ def risk_sgd_step(cfg, model, data, criterion, opt, device):
         return loss 
 
 
-def train_risk(cfg, model, data, criterion, opt, device):
-    model.train()
-    dataset = RiskyDataset(data["next_obs"].to('cpu'), None, data["risks"].to('cpu'), False, risk_type=cfg.risk_type,
-                            fear_clip=None, fear_radius=cfg.fear_radius, one_hot=True, quantile_size=cfg.quantile_size, quantile_num=cfg.quantile_num)
-    dataloader = DataLoader(dataset, batch_size=cfg.risk_batch_size, shuffle=True, num_workers=10, generator=torch.Generator(device='cpu'))
-    net_loss = 0
-    for batch in dataloader:
-        X, y = batch[0], batch[1]
-        pred = model(get_risk_obs(cfg, X).to(device))
-        if cfg.model_type == "mlp":
-            loss = criterion(pred, y.squeeze().to(device))
-        else:
-            loss = criterion(pred, torch.argmax(y.squeeze(), axis=1).to(device))
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-
-        net_loss += loss.item()
-    torch.save(model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
-    wandb.save("risk_model.pt")
-    model.eval()
-    print("risk_loss:", net_loss)
-    return net_loss
-
 def test_policy(cfg, agent, envs, device, risk_model=None):
     envs = gym.vector.SyncVectorEnv(
         [make_env(cfg, i, cfg.capture_video, "f", cfg.gamma) for i in range(20)]
@@ -577,7 +553,7 @@ def train(cfg):
         agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
         #else:
         #    agent = ContRiskAgent(envs=envs).to(device)
-        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=120, batch_norm=True, out_size=risk_size)
+        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=120, batch_norm=True, out_size=risk_size, model_type="state_action_risk", device=device)
         if os.path.exists(cfg.risk_model_path):
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             print("Pretrained risk model loaded successfully")
@@ -713,20 +689,23 @@ def train(cfg):
                     action, logprob, _, value = agent.get_action_and_value(next_obs)
 
                 values[step] = value.flatten()
-            #actions[step] = action
-            #logprobs[step] = logprob
 
-            #print(logprop_cand.size())
             if cfg.use_risk:
                 with torch.no_grad():
+                    # print(candidates)
                     candidates = candidates.squeeze()
                     logprop_cand = logprop_cand.squeeze()
-                    # print(next_obs_risk.repeat(5, 1).size(), candidates.size())
-                    candidates_risk = torch.sum(torch.exp(risk_model(next_obs_risk.repeat(5, 1).to(device), candidates))[:, :2], -1)
-                    best_cand = torch.argmin(candidates_risk)
-                    action = candidates[best_cand]
-                    logprop = logprop_cand[best_cand]
+                    candidates_risk = torch.sum(torch.exp(risk_model(next_obs_risk.repeat(5, 1).to(device), candidates))[:, :2], -1).cpu().numpy()
+                    candidates_safety = 1.0 - candidates_risk
+                    candidates_safety = candidates_safety - np.min(candidates_safety)
+                    candidates_safety = candidates_safety / np.sum(candidates_safety)
+                    action_idx = np.random.choice(range(int(candidates.size()[0])), p=candidates_safety)
+                    
+                    logprop = logprop_cand[action_idx]
+                    action = candidates[action_idx].unsqueeze(0)
+                    print(action.unsqueeze(0).size())
 
+            # print(actions.size())
             actions[step] = action
             logprobs[step] = logprob
             # TRY NOT TO MODIFY: execute the game and log data.
@@ -784,15 +763,24 @@ def train(cfg):
                     writer.add_scalar("risk/risk_loss", risk_loss, global_step)
             elif cfg.fine_tune_risk == "off" and cfg.use_risk:
                 if cfg.use_risk and (global_step > cfg.start_risk_update and cfg.fine_tune_risk) and global_step % cfg.risk_update_period == 0:
-                    #num_risk_epochs = 100 if total_risk_updates == 0 else cfg.num_risk_epochs
-                    for epoch in range(cfg.num_risk_epochs):
-                        total_risk_updates += 1
+                    for epoch in tqdm.tqdm(range(cfg.num_risk_epochs)):
+                        total_risk_updates +=1 
+                        print(total_risk_updates)
                         if cfg.finetune_risk_online:
                             print("I am online")
                             data = rb.slice_data(-cfg.risk_batch_size*cfg.num_update_risk, 0)
                         else:
                             data = rb.sample(cfg.risk_batch_size*cfg.num_update_risk)
-                        risk_loss = train_risk(cfg, risk_model, data, criterion, opt_risk, device)
+                        state = torch.cat([data["obs"], data["next_obs"]], axis=0)
+                        actions = torch.cat([data["actions"].squeeze(), torch.zeros_like(data["actions"]).squeeze()], axis=0)
+                        dist_to_fail = torch.cat([data["dist_to_fail"], data["dist_to_fail"]], axis=0)
+                        print(state.size(), actions.size(), dist_to_fail.size())
+                        risk_dataset = RiskyDataset(state.to(device), actions.to(device), dist_to_fail.to(device), True, risk_type=cfg.risk_type,
+                                fear_clip=None, fear_radius=cfg.fear_radius, one_hot=True, quantile_size=cfg.quantile_size, quantile_num=cfg.quantile_num)
+                        risk_dataloader = DataLoader(risk_dataset, batch_size=cfg.risk_batch_size, shuffle=True)
+
+                        risk_loss = train_risk(risk_model, risk_dataloader, criterion, opt_risk, 1, device, train_mode="state_action")
+
                     writer.add_scalar("risk/risk_loss", risk_loss, global_step)              
 
             # Only print when at least 1 env is done
