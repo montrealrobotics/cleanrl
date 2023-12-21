@@ -690,7 +690,7 @@ def train(cfg):
 
                 values[step] = value.flatten()
 
-            if cfg.use_risk:
+            if cfg.use_risk and False:
                 with torch.no_grad():
                     # print(candidates)
                     candidates = candidates.squeeze()
