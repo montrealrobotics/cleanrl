@@ -75,6 +75,8 @@ def parse_args():
         help="which training method to use (max cost or max update steps)? ")
     parser.add_argument("--max-cum-cost", type=int, default=1000,
         help="maximum cummulative cost before terminating")
+    parser.add_argument("--max-episodes", type=int, default=1000,
+        help="maximum cummulative cost before terminating")
     parser.add_argument("--total-timesteps", type=int, default=100000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=3e-4,
@@ -661,6 +663,9 @@ def train(cfg):
     f_risk_penalty = []
     risk_penalty = torch.Tensor([0.]).to(device)
     for update in range(1, num_updates + 1):
+        if episode > cfg.max_episodes-1:
+            break
+
         # Annealing the rate if instructed to do so.
         if cfg.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
@@ -819,6 +824,8 @@ def train(cfg):
                 writer.add_scalar("Performance/episodic_length", ep_len, global_step)
                 writer.add_scalar("Performance/episodic_cost", ep_cost, global_step)
                 writer.add_scalar("Performance/cummulative_cost", cum_cost, global_step)
+                writer.add_scalar("Episode", episode, global_step)
+
                 last_step = global_step
                 episode += 1
                 step_log = 0
