@@ -54,9 +54,9 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="SafetyCarGoal1Gymnasium-v0",
         help="the id of the environment")
-    parser.add_argument("--reward-goal", type=float, default=1.0, 
+    parser.add_argument("--reward-goal", type=float, default=10.0, 
         help="reward to give when the goal is achieved")
-    parser.add_argument("--reward-distance", type=float, default=1.0, 
+    parser.add_argument("--reward-distance", type=float, default=0.0, 
         help="reward to give when the goal is achieved")
     parser.add_argument("--early-termination", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="whether to terminate early i.e. when the catastrophe has happened")
@@ -85,7 +85,7 @@ def parse_args():
         help="the number of parallel game environments")
     parser.add_argument("--num-steps", type=int, default=2048,
         help="the number of steps to run in each environment per policy rollout")
-    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument("--gamma", type=float, default=0.99,
         help="the discount factor gamma")
@@ -420,7 +420,7 @@ def train_risk(cfg, model, data, criterion, opt, device):
     dataset = RiskyDataset(data["next_obs"].to('cpu'), None, data["risks"].to('cpu'), False, risk_type=cfg.risk_type,
                             fear_clip=None, fear_radius=cfg.fear_radius, one_hot=True, quantile_size=cfg.quantile_size, quantile_num=cfg.quantile_num)
     dataloader = DataLoader(dataset, batch_size=cfg.risk_batch_size, shuffle=True, num_workers=10, generator=torch.Generator(device='cpu'))
-    net_loss = 0
+    net_loss = []
     for batch in dataloader:
         X, y = batch[0], batch[1]
         pred = model(get_risk_obs(cfg, X).to(device))
@@ -432,12 +432,12 @@ def train_risk(cfg, model, data, criterion, opt, device):
         loss.backward()
         opt.step()
 
-        net_loss += loss.item()
-    torch.save(model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
-    wandb.save("risk_model.pt")
+        net_loss.append(loss.item())
+    #torch.save(model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
+    #wandb.save("risk_model.pt")
     model.eval()
-    print("risk_loss:", net_loss)
-    return net_loss
+    #print("risk_loss:", net_loss)
+    return np.mean(net_loss)
 
 def test_policy(cfg, agent, envs, device, risk_model=None):
     envs = gym.vector.SyncVectorEnv(
@@ -514,7 +514,7 @@ def train(cfg):
     cfg.use_risk = False if cfg.risk_model_path == "None" else True 
 
     import wandb 
-    run = wandb.init(config=vars(cfg), entity="kaustubh95",
+    run = wandb.init(config=vars(cfg), entity="manila95",
                    project="risk_aware_exploration",
                    monitor_gym=True,
                    sync_tensorboard=True, save_code=True)
@@ -576,7 +576,7 @@ def train(cfg):
         agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
         #else:
         #    agent = ContRiskAgent(envs=envs).to(device)
-        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=120, batch_norm=True, out_size=risk_size)
+        risk_model = risk_model_class[cfg.model_type][cfg.risk_type](obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=True, out_size=risk_size)
         if os.path.exists(cfg.risk_model_path):
             risk_model.load_state_dict(torch.load(cfg.risk_model_path, map_location=device))
             print("Pretrained risk model loaded successfully")
@@ -618,8 +618,8 @@ def train(cfg):
     #else:
     risks = torch.zeros((cfg.num_steps, cfg.num_envs) + (risk_size,)).to(device)
 
-    all_costs = torch.zeros((cfg.total_timesteps, cfg.num_envs)).to(device)
-    all_risks = torch.zeros((cfg.total_timesteps, cfg.num_envs, risk_size)).to(device)
+    #all_costs = torch.zeros((cfg.total_timesteps, cfg.num_envs)).to(device)
+    #all_risks = torch.zeros((cfg.total_timesteps, cfg.num_envs, risk_size)).to(device)
 
 
     # TRY NOT TO MODIFY: start the game
@@ -647,7 +647,7 @@ def train(cfg):
     f_dones = [None]*cfg.num_envs
     f_costs = [None]*cfg.num_envs
     f_risks_quant = [None]*cfg.num_envs
-    scores = []; goal_scores = []
+    scores = [0]*99; goal_scores = [0]*99
     # risk_ = torch.Tensor([[1., 0.]]).to(device)
     # print(f_obs.size(), f_risks.size())
     all_data = None
@@ -662,10 +662,9 @@ def train(cfg):
     total_risk_updates = 0
     f_risk_penalty = []
     risk_penalty = torch.Tensor([0.]).to(device)
-    for update in range(1, num_updates + 1):
-        if episode > cfg.max_episodes-1:
-            break
-
+    update = 0
+    while episode < cfg.max_episodes:
+        update += 1
         # Annealing the rate if instructed to do so.
         if cfg.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
@@ -678,7 +677,7 @@ def train(cfg):
             obs[step] = next_obs
             dones[step] = next_done
             costs[step] = cost
-            all_costs[global_step] = cost
+            #all_costs[global_step] = cost
 
             if cfg.use_risk:
                 with torch.no_grad():
@@ -704,7 +703,7 @@ def train(cfg):
                 f_risk_penalty.append(risk_penalty.item())
                 # print(next_risk)
                 risks[step] = next_risk
-                all_risks[global_step] = risk_prob#, axis=-1)
+                #/all_risks[global_step] = risk_prob#, axis=-1)
 
 
             # ALGO LOGIC: action logic
@@ -808,14 +807,14 @@ def train(cfg):
                 #avg_total_reward = np.mean(test_policy(cfg, agent, envs, device=device, risk_model=risk_model))
                 avg_mean_score = np.mean(scores[-100:])
                 writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
-                torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
-                wandb.save("policy.pt")
-                print(f"cummulative_cost={cum_cost}, global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
+                #torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
+                #wandb.save("policy.pt")
+                print(f"Episode={episode}, global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
                 if cfg.use_risk:
-                    ep_risk = torch.sum(all_risks.squeeze()[last_step:global_step, 0]).item()
-                    cum_risk += ep_risk
-                    writer.add_scalar("risk/episodic_risk", ep_risk, global_step)
-                    writer.add_scalar("risk/cummulative_risk", cum_risk, global_step)
+                    #ep_risk = torch.sum(all_risks.squeeze()[last_step:global_step, 0]).item()
+                    #cum_risk += ep_risk
+                    #writer.add_scalar("risk/episodic_risk", ep_risk, global_step)
+                    #writer.add_scalar("risk/cummulative_risk", cum_risk, global_step)
                     writer.add_scalar("risk/risk-penalty", np.sum(f_risk_penalty), global_step)
                     print(total_risk_updates, np.sum(f_risk_penalty))
                     f_risk_penalty = []
@@ -992,6 +991,11 @@ def train(cfg):
         print("SPS:", int(global_step / (time.time() - start_time)))
         #experiment.log_metric("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
+    torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
+    wandb.save("policy.pt")
+    if cfg.use_risk:
+        torch.save(model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
+        wandb.save("risk_model.pt")
     print(f_ep_len)
     envs.close()
     writer.close()
