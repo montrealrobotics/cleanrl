@@ -570,6 +570,7 @@ def train(cfg):
     else:
         risk_obs_size = 88
 
+    print(envs.single_observation_space.shape)
     if cfg.use_risk:
         print("using risk")
         #if cfg.risk_type == "binary":
@@ -740,6 +741,8 @@ def train(cfg):
             cost = torch.Tensor(np.zeros(cfg.num_envs)).to(device)
 
             if (cfg.fine_tune_risk != "None" and cfg.use_risk) or cfg.collect_data:
+                #if f_obs[0] is not None:
+                #    print(f_obs[0].size())
                 for i in range(cfg.num_envs):
                     f_obs[i] = obs_[i].unsqueeze(0).to(device) if f_obs[i] is None else torch.concat([f_obs[i], obs_[i].unsqueeze(0).to(device)], axis=0)
                     f_next_obs[i] = next_obs[i].unsqueeze(0).to(device) if f_next_obs[i] is None else torch.concat([f_next_obs[i], next_obs[i].unsqueeze(0).to(device)], axis=0)
@@ -839,9 +842,18 @@ def train(cfg):
                     f_risks = e_risks.unsqueeze(1)
                     f_risks_quant = e_risks_quant 
                 elif cfg.collect_data:
-                    f_risks = e_risks.unsqueeze(1) if f_risks is None else torch.concat([f_risks, e_risks.unsqueeze(1)], axis=0)
+                    f_risks = e_risks.unsqueeze(1) #if f_risks is None else torch.concat([f_risks, e_risks.unsqueeze(1)], axis=0)
 
-                
+                ## Save all the data
+                if cfg.collect_data:
+                    #print(f_obs[0].size(), f_risks.size())
+                    os.makedirs(os.path.join(storage_path, str(episode)))
+                    torch.save(f_obs[0], os.path.join(storage_path, str(episode), "obs.pt"))
+                    torch.save(f_next_obs[0], os.path.join(storage_path, str(episode), "next_obs.pt"))
+                    torch.save(f_actions[0], os.path.join(storage_path, str(episode), "actions.pt"))
+                    torch.save(f_costs[0], os.path.join(storage_path, str(episode), "costs.pt"))
+                    torch.save(f_risks, os.path.join(storage_path, str(episode), "risks.pt"))
+
                 if cfg.fine_tune_risk in ["off", "sync"] and cfg.use_risk and cum_cost > 0:
                     f_dist_to_fail = e_risks
                     if cfg.rb_type == "balanced":
@@ -872,25 +884,6 @@ def train(cfg):
                     f_costs[i] = None
                 else:
                     f_obs[i], f_next_obs[i], f_risks, f_actions[i], f_rewards[i], f_dones[i], f_costs[i] = None, None, None, None, None, None, None
-
-                ## Save all the data
-                if cfg.collect_data:
-                    os.makedirs(os.path.join(storage_path, str(episode)))
-                    torch.save(f_obs[0], os.path.join(storage_path, str(episode), "obs.pt"))
-                    torch.save(f_next_obs[0], os.path.join(storage_path, str(episode), "next_obs.pt"))
-                    torch.save(f_actions[0], os.path.join(storage_path, str(episode), "actions.pt"))
-                    torch.save(f_costs[0], os.path.join(storage_path, str(episode), "costs.pt"))
-                    torch.save(f_risks, os.path.join(storage_path, str(episode), "risks.pt"))
-                    f_obs[i] = None
-                    f_next_obs[i] = None
-                    f_risks = None
-                    #f_ep_len = None
-                    f_actions[i] = None
-                    f_rewards[i] = None
-                    f_dones[i] = None
-                    f_costs[i] = None 
-                    #torch.save(torch.Tensor(f_ep_len), os.path.join(storage_path, "ep_len.pt"))
-                    #make_dirs(storage_path, episode)
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -1015,6 +1008,8 @@ def train(cfg):
 
 if __name__ == "__main__":
     cfg = parse_args()
+    env = gym.make("SafetyCarGoal1Gymnasium-v0")
+    print(env.reset()[0].shape)
     train(cfg)
 
 
