@@ -73,7 +73,7 @@ def parse_args():
     
     parser.add_argument("--training-method", type=str, default="steps",
         help="which training method to use (max cost or max update steps)? ")
-    parser.add_argument("--max-cum-cost", type=int, default=1000,
+    parser.add_argument("--max-episodes", type=int, default=1000,
         help="maximum cummulative cost before terminating")
     parser.add_argument("--total-timesteps", type=int, default=100000,
         help="total timesteps of the experiments")
@@ -154,7 +154,7 @@ def parse_args():
     parser.add_argument("--weight", type=float, default=1.0, 
         help="weight for the 1 class in BCE loss")
     parser.add_argument("--quantile-size", type=int, default=4, help="size of the risk quantile ")
-    parser.add_argument("--quantile-num", type=int, default=5, help="number of quantiles to make")
+    parser.add_argument("--quantile-num", type=int, default=10, help="number of quantiles to make")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -505,18 +505,18 @@ def train(cfg):
     cfg.use_risk = False if cfg.risk_model_path == "None" else True 
 
     import wandb 
-    run = wandb.init(config=vars(cfg), entity="manila95",
+    run = wandb.init(config=vars(cfg), entity="kaustubh_umontreal",
                    project="risk_aware_exploration",
                    monitor_gym=True,
                    sync_tensorboard=True, save_code=True)
-    experiment = Experiment(
-        api_key="FlhfmY238jUlHpcRzzuIw3j2t",
-        project_name="risk-aware-exploration",
-        workspace="hbutsuak95",
-    )
+    #experiment = Experiment(
+    #    api_key="FlhfmY238jUlHpcRzzuIw3j2t",
+    #    project_name="risk-aware-exploration",
+    #    workspace="hbutsuak95",
+    #)
 
-    experiment.add_tag(run.sweep_id)
-    experiment.log_parameters(cfg)
+    #experiment.add_tag(run.sweep_id)
+    #experiment.log_parameters(cfg)
     #experiment.log_parameters(cfg.risk)
     #experiment.log_parameters(cfg.env)
 
@@ -531,7 +531,10 @@ def train(cfg):
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.model_seed)
-    torch.backends.cudnn.deterministic = cfg.torch_deterministic
+#    torch.backends.cudnn.deterministic = cfg.torch_deterministic
+
+    torch.backends.cudnn.deterministic = True
+    torch.set_num_threads(4)
 
     device = torch.device("cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu")
 
@@ -562,12 +565,12 @@ def train(cfg):
         else:
             criterion = nn.BCEWithLogitsLoss(pos_weight=weight_tensor)
 
-    if "goal" in cfg.risk_model_path.lower():
-        risk_obs_size = 72 
-    elif cfg.risk_model_path == "scratch":
-        risk_obs_size = np.array(envs.single_observation_space.shape).prod()
-    else:
-        risk_obs_size = 88
+    #if "goal" in cfg.risk_model_path.lower():
+    #    risk_obs_size = 72 
+    #if cfg.risk_model_path == "scratch":
+    risk_obs_size = np.array(envs.single_observation_space.shape).prod()
+    #else:
+    #    risk_obs_size = 88
 
     if cfg.use_risk:
         print("using risk")
@@ -658,11 +661,14 @@ def train(cfg):
     
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
-        if cfg.anneal_lr:
-            frac = 1.0 - (update - 1.0) / num_updates
-            lrnow = frac * cfg.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
-
+        #if cfg.anneal_lr:
+        #    frac = 1.0 - (update - 1.0) / num_updates
+        #    lrnow = frac * cfg.learning_rate
+        #    optimizer.param_groups[0]["lr"] = lrnow
+        print(episode, cfg.max_episodes)
+        if episode > cfg.max_episodes:
+            break
+        
         for step in range(0, cfg.num_steps):
             risk = torch.Tensor([[0.]]).to(device)
             global_step += 1 * cfg.num_envs
@@ -793,6 +799,10 @@ def train(cfg):
                 writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
                 torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
                 wandb.save("policy.pt")
+                if cfg.use_risk:
+                    torch.save(risk_model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
+                    wandb.save("risk_model.pt")
+
                 print(f"cummulative_cost={cum_cost}, global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
                 if cfg.use_risk:
                     ep_risk = torch.sum(all_risks[last_step:global_step]).item()
@@ -804,6 +814,7 @@ def train(cfg):
                 writer.add_scalar("Performance/episodic_length", ep_len, global_step)
                 writer.add_scalar("Performance/episodic_cost", ep_cost, global_step)
                 writer.add_scalar("Performance/cummulative_cost", cum_cost, global_step)
+                writer.add_scalar("Episode", episode, global_step)
                 last_step = global_step
                 episode += 1
                 step_log = 0
@@ -838,7 +849,7 @@ def train(cfg):
                         if cfg.risk_type == "binary":
                             rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], (f_risks <= cfg.fear_radius).float(), e_risks.unsqueeze(1))
                         else:
-                            rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], f_risks, f_risks)
+                            rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], f_risks_quant, f_risks)
 
                     f_obs[i] = None    
                     f_next_obs[i] = None
