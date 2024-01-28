@@ -5,8 +5,9 @@ import random
 import time
 from distutils.util import strtobool
 
-import safety_gymnasium, panda_gym
-import gymnasium as gym
+# import safety_gymnasium, panda_gym
+import gym
+import bullet_safety_gym
 import numpy as np
 import torch
 import torch.nn as nn
@@ -80,6 +81,8 @@ def parse_args():
     parser.add_argument("--learning-rate", type=float, default=3e-4,
         help="the learning rate of the optimizer")
     parser.add_argument("--num-envs", type=int, default=1,
+        help="the number of parallel game environments")
+    parser.add_argument("--env-num-steps", type=int, default=1000,
         help="the number of parallel game environments")
     parser.add_argument("--num-steps", type=int, default=2048,
         help="the number of steps to run in each environment per policy rollout")
@@ -168,9 +171,9 @@ def parse_args():
 def make_env(cfg, idx, capture_video, run_name, gamma):
     def thunk():
         if capture_video:
-            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            env = gym.make(cfg.env_id)#, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
         else:
-            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            env = gym.make(cfg.env_id) #, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance, num_steps=cfg.env_num_steps)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
@@ -623,7 +626,7 @@ def train(cfg):
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset(seed=cfg.seed)
+    next_obs = envs.reset()#seed=cfg.seed)
 #
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(cfg.num_envs).to(device)
@@ -709,8 +712,8 @@ def train(cfg):
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
-            done = np.logical_or(terminated, truncated)
+            next_obs, reward, done, infos = envs.step(action.cpu().numpy())
+            # done = np.logical_or(terminated, truncated)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'obs': obs} 
@@ -772,101 +775,109 @@ def train(cfg):
                         risk_loss = train_risk(cfg, risk_model, data, criterion, opt_risk, device)
                     writer.add_scalar("risk/risk_loss", risk_loss, global_step)              
 
-            # Only print when at least 1 env is done
-            if "final_info" not in infos:
-                continue
 
+            for item in infos:
+                if "episode" in item.keys():
+                    print(f"global_step={global_step}, episodic_return={item['episode']['r']}")
+                    writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
+                    writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
+            #     episode += 1
+            #     step_log = 0
+            #     # f_dist_to_fail = torch.Tensor(np.array(list(reversed(range(f_obs.size()[0]))))).to(device) if cost > 0 else torch.Tensor(np.array([f_obs.size()[0]]*f_obs.shape[0])).to(device)
+            #     e_risks = np.array(list(reversed(range(int(ep_len))))) if cum_cost > 0 else np.array([int(ep_len)]*int(ep_len))
+            #     # print(risks.size())
+            #     e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(e_risks, 1)))
+            #     e_risks = torch.Tensor(e_risks)
 
-            for i, info in enumerate(infos["final_info"]):
-                # Skip the envs that are not done
-                if info is None:
-                    continue
-                ep_cost = info["cost_sum"]
-                cum_cost += ep_cost
-                ep_len = info["episode"]["l"][0]
-                buffer_num += ep_len
-                goal_met += info["cum_goal_met"]
-                #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
-                scores.append(info['episode']['r'])
-                goal_scores.append(info["cum_goal_met"])
-                writer.add_scalar("goals/Ep Goal Achieved ", info["cum_goal_met"], global_step)
-                writer.add_scalar("goals/Avg Ep Goal", np.mean(goal_scores[-100:]))
-                writer.add_scalar("goals/Total Goal Achieved", goal_met, global_step)
-                ep_goal_met = 0
-                
-                #avg_total_reward = np.mean(test_policy(cfg, agent, envs, device=device, risk_model=risk_model))
-                avg_mean_score = np.mean(scores[-100:])
-                writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
-                torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
-                wandb.save("policy.pt")
-                if cfg.use_risk:
-                    torch.save(risk_model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
-                    wandb.save("risk_model.pt")
+            #     print(e_risks_quant.size())
+            #     if cfg.fine_tune_risk != "None" and cfg.use_risk:
+            #         f_risks = e_risks.unsqueeze(1)
+            #         f_risks_quant = e_risks_quant 
+            #     elif cfg.collect_data:
+            #         f_risks = e_risks.unsqueeze(1) if f_risks is None else torch.concat([f_risks, e_risks.unsqueeze(1)], axis=0)
 
-                print(f"cummulative_cost={cum_cost}, global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
-                if cfg.use_risk:
-                    ep_risk = torch.sum(all_risks[last_step:global_step]).item()
-                    cum_risk += ep_risk
-                    writer.add_scalar("risk/episodic_risk", ep_risk, global_step)
-                    writer.add_scalar("risk/cummulative_risk", cum_risk, global_step)
-
-                writer.add_scalar("Performance/episodic_return", info["episode"]["r"], global_step)
-                writer.add_scalar("Performance/episodic_length", ep_len, global_step)
-                writer.add_scalar("Performance/episodic_cost", ep_cost, global_step)
-                writer.add_scalar("Performance/cummulative_cost", cum_cost, global_step)
-                writer.add_scalar("Episode", episode, global_step)
-                last_step = global_step
-                episode += 1
-                step_log = 0
-                # f_dist_to_fail = torch.Tensor(np.array(list(reversed(range(f_obs.size()[0]))))).to(device) if cost > 0 else torch.Tensor(np.array([f_obs.size()[0]]*f_obs.shape[0])).to(device)
-                e_risks = np.array(list(reversed(range(int(ep_len))))) if cum_cost > 0 else np.array([int(ep_len)]*int(ep_len))
-                # print(risks.size())
-                e_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(e_risks, 1)))
-                e_risks = torch.Tensor(e_risks)
-
-                print(e_risks_quant.size())
-                if cfg.fine_tune_risk != "None" and cfg.use_risk:
-                    f_risks = e_risks.unsqueeze(1)
-                    f_risks_quant = e_risks_quant 
-                elif cfg.collect_data:
-                    f_risks = e_risks.unsqueeze(1) if f_risks is None else torch.concat([f_risks, e_risks.unsqueeze(1)], axis=0)
-
-                if cfg.fine_tune_risk in ["off", "sync"] and cfg.use_risk:
-                    f_dist_to_fail = e_risks
-                    if cfg.rb_type == "balanced":
-                        idx_risky = (f_dist_to_fail<=cfg.fear_radius)
-                        idx_safe = (f_dist_to_fail>cfg.fear_radius)
-                        risk_ones = torch.ones_like(f_risks)
-                        risk_zeros = torch.zeros_like(f_risks)
+            #     if cfg.fine_tune_risk in ["off", "sync"] and cfg.use_risk:
+            #         f_dist_to_fail = e_risks
+            #         if cfg.rb_type == "balanced":
+            #             idx_risky = (f_dist_to_fail<=cfg.fear_radius)
+            #             idx_safe = (f_dist_to_fail>cfg.fear_radius)
+            #             risk_ones = torch.ones_like(f_risks)
+            #             risk_zeros = torch.zeros_like(f_risks)
                         
-                        if cfg.risk_type == "binary":
-                            rb.add_risky(f_obs[i][idx_risky], f_next_obs[i][idx_risky], f_actions[i][idx_risky], f_rewards[i][idx_risky], f_dones[i][idx_risky], f_costs[i][idx_risky], risk_ones[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
-                            rb.add_safe(f_obs[i][idx_safe], f_next_obs[i][idx_safe], f_actions[i][idx_safe], f_rewards[i][idx_safe], f_dones[i][idx_safe], f_costs[i][idx_safe], risk_zeros[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
-                        else:
-                            rb.add_risky(f_obs[i][idx_risky], f_next_obs[i][idx_risky], f_actions[i][idx_risky], f_rewards[i][idx_risky], f_dones[i][idx_risky], f_costs[i][idx_risky], f_risks_quant[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
-                            rb.add_safe(f_obs[i][idx_safe], f_next_obs[i][idx_safe], f_actions[i][idx_safe], f_rewards[i][idx_safe], f_dones[i][idx_safe], f_costs[i][idx_safe], f_risks_quant[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
-                    else:
-                        if cfg.risk_type == "binary":
-                            rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], (f_risks <= cfg.fear_radius).float(), e_risks.unsqueeze(1))
-                        else:
-                            rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], f_risks_quant, f_risks)
+            #             if cfg.risk_type == "binary":
+            #                 rb.add_risky(f_obs[i][idx_risky], f_next_obs[i][idx_risky], f_actions[i][idx_risky], f_rewards[i][idx_risky], f_dones[i][idx_risky], f_costs[i][idx_risky], risk_ones[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
+            #                 rb.add_safe(f_obs[i][idx_safe], f_next_obs[i][idx_safe], f_actions[i][idx_safe], f_rewards[i][idx_safe], f_dones[i][idx_safe], f_costs[i][idx_safe], risk_zeros[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
+            #             else:
+            #                 rb.add_risky(f_obs[i][idx_risky], f_next_obs[i][idx_risky], f_actions[i][idx_risky], f_rewards[i][idx_risky], f_dones[i][idx_risky], f_costs[i][idx_risky], f_risks_quant[idx_risky], f_dist_to_fail.unsqueeze(1)[idx_risky])
+            #                 rb.add_safe(f_obs[i][idx_safe], f_next_obs[i][idx_safe], f_actions[i][idx_safe], f_rewards[i][idx_safe], f_dones[i][idx_safe], f_costs[i][idx_safe], f_risks_quant[idx_safe], f_dist_to_fail.unsqueeze(1)[idx_safe])
+            #         else:
+            #             if cfg.risk_type == "binary":
+            #                 rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], (f_risks <= cfg.fear_radius).float(), e_risks.unsqueeze(1))
+            #             else:
+            #                 rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], f_risks_quant, f_risks)
 
-                    f_obs[i] = None    
-                    f_next_obs[i] = None
-                    f_risks = None
-                    #f_ep_len = None
-                    f_actions[i] = None
-                    f_rewards[i] = None
-                    f_dones[i] = None
-                    f_costs[i] = None
+            #         f_obs[i] = None    
+            #         f_next_obs[i] = None
+            #         f_risks = None
+            #         #f_ep_len = None
+            #         f_actions[i] = None
+            #         f_rewards[i] = None
+            #         f_dones[i] = None
+            #         f_costs[i] = None
 
-                ## Save all the data
-                if cfg.collect_data:
-                    torch.save(f_obs, os.path.join(storage_path, "obs.pt"))
-                    torch.save(f_actions, os.path.join(storage_path, "actions.pt"))
-                    torch.save(f_costs, os.path.join(storage_path, "costs.pt"))
-                    torch.save(f_risks, os.path.join(storage_path, "risks.pt"))
-                    torch.save(torch.Tensor(f_ep_len), os.path.join(storage_path, "ep_len.pt"))
+                    break
+            # # Only print when at least 1 env is done
+            # if "final_info" not in infos:
+            #     continue
+
+
+            # for i, info in enumerate(infos["final_info"]):
+            #     # Skip the envs that are not done
+            #     if info is None:
+            #         continue
+            #     ep_cost = info["cost_sum"]
+            #     cum_cost += ep_cost
+            #     ep_len = info["episode"]["l"][0]
+            #     buffer_num += ep_len
+            #     goal_met += info["cum_goal_met"]
+            #     #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
+            #     scores.append(info['episode']['r'])
+            #     goal_scores.append(info["cum_goal_met"])
+            #     writer.add_scalar("goals/Ep Goal Achieved ", info["cum_goal_met"], global_step)
+            #     writer.add_scalar("goals/Avg Ep Goal", np.mean(goal_scores[-100:]))
+            #     writer.add_scalar("goals/Total Goal Achieved", goal_met, global_step)
+            #     ep_goal_met = 0
+                
+            #     #avg_total_reward = np.mean(test_policy(cfg, agent, envs, device=device, risk_model=risk_model))
+            #     avg_mean_score = np.mean(scores[-100:])
+            #     writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
+            #     torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
+            #     wandb.save("policy.pt")
+            #     if cfg.use_risk:
+            #         torch.save(risk_model.state_dict(), os.path.join(wandb.run.dir, "risk_model.pt"))
+            #         wandb.save("risk_model.pt")
+
+            #     print(f"cummulative_cost={cum_cost}, global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
+            #     if cfg.use_risk:
+            #         ep_risk = torch.sum(all_risks[last_step:global_step]).item()
+            #         cum_risk += ep_risk
+            #         writer.add_scalar("risk/episodic_risk", ep_risk, global_step)
+            #         writer.add_scalar("risk/cummulative_risk", cum_risk, global_step)
+
+            #     writer.add_scalar("Performance/episodic_return", info["episode"]["r"], global_step)
+            #     writer.add_scalar("Performance/episodic_length", ep_len, global_step)
+            #     writer.add_scalar("Performance/episodic_cost", ep_cost, global_step)
+            #     writer.add_scalar("Performance/cummulative_cost", cum_cost, global_step)
+            #     writer.add_scalar("Episode", episode, global_step)
+            #     last_step = global_step
+
+            #     ## Save all the data
+            #     if cfg.collect_data:
+            #         torch.save(f_obs, os.path.join(storage_path, "obs.pt"))
+            #         torch.save(f_actions, os.path.join(storage_path, "actions.pt"))
+            #         torch.save(f_costs, os.path.join(storage_path, "costs.pt"))
+            #         torch.save(f_risks, os.path.join(storage_path, "risks.pt"))
+            #         torch.save(torch.Tensor(f_ep_len), os.path.join(storage_path, "ep_len.pt"))
                     #make_dirs(storage_path, episode)
 
         # bootstrap value if not done
