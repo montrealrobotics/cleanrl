@@ -26,6 +26,7 @@ from src.utils import *
 
 import hydra
 import os
+import stable_baselines3.common.buffers as buffers # import ReplayBuffer
 
 
 
@@ -155,6 +156,27 @@ def parse_args():
         help="weight for the 1 class in BCE loss")
     parser.add_argument("--quantile-size", type=int, default=4, help="size of the risk quantile ")
     parser.add_argument("--quantile-num", type=int, default=10, help="number of quantiles to make")
+
+
+
+    ## Arguments related to csc model 
+    parser.add_argument("--use-csc", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="Use risk model or not ")
+    parser.add_argument("--csc-model-path", type=str, default="None",
+        help="the id of the environment")
+    parser.add_argument("--csc-lr", type=float, default=1e-7,
+        help="the learning rate of the optimizer")
+    parser.add_argument("--csc-batch-size", type=int, default=1000,
+        help="number of epochs to update the risk model")
+    parser.add_argument("--csc-learning-starts", type=int, default=1000,
+        help="number of epochs to update the risk model") 
+    parser.add_argument("--csc-eps", type=float, default=0.1,
+        help="the learning rate of the optimizer")
+    parser.add_argument("--tau", type=float, default=1.,
+        help="the target network update rate")
+    parser.add_argument("--target-network-frequency", type=int, default=500,
+        help="the timesteps it takes to update the target network")
+    
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -244,6 +266,17 @@ class RiskAgent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x, risk)
 
+    def get_action(self, x, risk, action=None):
+        x = torch.cat([x, risk], axis=1)
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action).sum(1), None
+
+
 class RiskAgent1(nn.Module):
     def __init__(self, envs, linear_size=64, risk_size=2):
         super().__init__()
@@ -277,6 +310,16 @@ class RiskAgent1(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
+    def get_action(self, x, risk, action=None):
+        x = torch.cat([x, risk], axis=1)
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action).sum(1), None
+
 
 class Agent(nn.Module):
     def __init__(self, envs, linear_size=64, risk_size=None):
@@ -307,6 +350,30 @@ class Agent(nn.Module):
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+
+    def get_action(self, x, action=None):
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action).sum(1), None 
+
+    def get_filtered_action_and_value(self, x, csc, eps=0.1, action=None):
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            obs = x.repeat(100, 1)
+            actions = probs.sample_n(100)
+            qcs = csc(obs, actions.squeeze())
+            # print(qcs)
+            safe = (qcs <= eps)
+            action = actions[safe][0] if torch.any(safe) else actions[torch.argmin(qcs)]
+
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
 
@@ -343,6 +410,42 @@ class ContRiskAgent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
+    def get_action(self, x, risk, action=None):
+        x = torch.cat([x, risk], axis=1)
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action).sum(1), None
+
+    def get_filtered_action_and_value(self, x, csc, action=None):
+        x = torch.cat([x, risk], axis=1)
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+
+
+
+# ALGO LOGIC: initialize agent here:
+class SoftQNetwork(nn.Module):
+    def __init__(self, env):
+        super().__init__()
+        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, 1)
+
+    def forward(self, x, a):
+        x = torch.cat([x, a], 1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        return torch.clamp(x, 0, 1)
 
 
 
@@ -358,6 +461,7 @@ class RiskDataset(nn.Module):
         y = torch.zeros(2)
         y[int(self.targets[idx][0])] = 1.0
         return self.inputs[idx], y
+
 
 
 
@@ -505,8 +609,8 @@ def train(cfg):
     cfg.use_risk = False if cfg.risk_model_path == "None" else True 
 
     import wandb 
-    run = wandb.init(config=vars(cfg), entity="kaustubh_umontreal",
-                   project="risk_aware_exploration",
+    run = wandb.init(config=vars(cfg), entity="manila95",
+                   project="risk-aware-exploration",
                    monitor_gym=True,
                    sync_tensorboard=True, save_code=True)
     #experiment = Experiment(
@@ -538,6 +642,7 @@ def train(cfg):
 
     device = torch.device("cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu")
 
+
     # env setup
     envs = gym.vector.SyncVectorEnv(
         [make_env(cfg, i, cfg.capture_video, run_name, cfg.gamma) for i in range(cfg.num_envs)]
@@ -565,12 +670,24 @@ def train(cfg):
         else:
             criterion = nn.BCEWithLogitsLoss(pos_weight=weight_tensor)
 
-    #if "goal" in cfg.risk_model_path.lower():
-    #    risk_obs_size = 72 
-    #if cfg.risk_model_path == "scratch":
     risk_obs_size = np.array(envs.single_observation_space.shape).prod()
-    #else:
-    #    risk_obs_size = 88
+    if cfg.use_csc:
+        qf1 = SoftQNetwork(envs).to(device)
+        qf2 = SoftQNetwork(envs).to(device)
+        qf1_target = SoftQNetwork(envs).to(device)
+        qf2_target = SoftQNetwork(envs).to(device)
+        qf1_target.load_state_dict(qf1.state_dict())
+        qf2_target.load_state_dict(qf2.state_dict())
+        q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=cfg.csc_lr)
+        csc_rb = buffers.ReplayBuffer(
+            1000000,
+            envs.single_observation_space,
+            envs.single_action_space,
+            device,
+            handle_timeout_termination=False,
+        )
+
+
 
     if cfg.use_risk:
         print("using risk")
@@ -704,6 +821,9 @@ def train(cfg):
                 else:
                     action, logprob, _, value = agent.get_action_and_value(next_obs)
 
+                if cfg.use_csc:
+                    action, logprob, _, value = agent.get_filtered_action_and_value(next_obs, qf1_target, cfg.csc_eps)
+
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -712,6 +832,11 @@ def train(cfg):
             next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
+            real_next_obs = next_obs.copy()
+            for idx, trunc in enumerate(truncated):
+                if trunc:
+                    real_next_obs[idx] = infos["final_observation"][idx]
+            csc_rb.add(obs_, real_next_obs, action, np.array(terminated).astype(float), done, infos)
 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'obs': obs} 
             # if cfg.collect_data:
@@ -771,6 +896,38 @@ def train(cfg):
                             data = rb.sample(cfg.risk_batch_size*cfg.num_update_risk)
                         risk_loss = train_risk(cfg, risk_model, data, criterion, opt_risk, device)
                     writer.add_scalar("risk/risk_loss", risk_loss, global_step)              
+            alpha=0.2
+            if cfg.use_csc:
+                # ALGO LOGIC: training.
+                if global_step > cfg.csc_learning_starts:
+                    data = csc_rb.sample(cfg.csc_batch_size)
+                    with torch.no_grad():
+                        next_state_actions, next_state_log_pi, _ = agent.get_action(data.next_observations.float())
+                        # print(next_state_log_pi.size())
+                        qf1_next_target = qf1_target(data.next_observations.float(), next_state_actions.float())
+                        qf2_next_target = qf2_target(data.next_observations.float(), next_state_actions.float())
+                        # print(data.next_observations.size(), next_state_actions.float().size(), torch.min(qf1_next_target, qf2_next_target).size())
+                        min_qf_next_target = torch.min(qf1_next_target, qf2_next_target)
+                        # print(data.rewards.flatten().size(), data.dones.flatten().size(), min_qf_next_target.size())
+                        next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * cfg.gamma * (min_qf_next_target).view(-1)
+
+                    qf1_a_values = qf1(data.observations.float(), data.actions.float()).view(-1)
+                    qf2_a_values = qf2(data.observations.float(), data.actions.float()).view(-1)
+                    qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
+                    qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
+                    qf_loss = qf1_loss + qf2_loss
+
+                    # optimize the model
+                    q_optimizer.zero_grad()
+                    qf_loss.backward()
+                    q_optimizer.step()
+
+                # update the target networks
+                if global_step % cfg.target_network_frequency == 0:
+                    for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
+                        target_param.data.copy_(cfg.tau * param.data + (1 - cfg.tau) * target_param.data)
+                    for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
+                        target_param.data.copy_(cfg.tau * param.data + (1 - cfg.tau) * target_param.data)
 
             # Only print when at least 1 env is done
             if "final_info" not in infos:
