@@ -740,12 +740,12 @@ def train(cfg):
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset(seed=cfg.seed)
+    next_obs_, _ = envs.reset(seed=cfg.seed)
 #
-    next_obs = torch.Tensor(next_obs).to(device)
+    next_obs = torch.Tensor(next_obs_).to(device)
     next_done = torch.zeros(cfg.num_envs).to(device)
     num_updates = cfg.total_timesteps // cfg.batch_size
-    obs_ = next_obs
+    obs_ = next_obs_
     cum_cost, ep_cost, ep_risk_cost_int, cum_risk_cost_int, ep_risk, cum_risk = 0, 0, 0, 0, 0, 0
     cost = 0
     last_step = 0
@@ -836,7 +836,9 @@ def train(cfg):
             for idx, trunc in enumerate(truncated):
                 if trunc:
                     real_next_obs[idx] = infos["final_observation"][idx]
-            csc_rb.add(obs_, real_next_obs, action, np.array(terminated).astype(float), done, infos)
+            
+            if cfg.use_csc:
+                csc_rb.add(obs_, real_next_obs, action, np.array(terminated).astype(float), done, infos)
 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'obs': obs} 
             # if cfg.collect_data:
@@ -865,7 +867,8 @@ def train(cfg):
                     f_costs[i] = cost[i].unsqueeze(0).to(device) if f_costs[i] is None else torch.concat([f_costs[i], cost[i].unsqueeze(0).to(device)], axis=0)
                     f_dones[i] = next_done[i].unsqueeze(0).to(device) if f_dones[i] is None else torch.concat([f_dones[i], next_done[i].unsqueeze(0).to(device)], axis=0)
 
-            obs_ = next_obs
+            obs_ = next_obs_
+            obs = next_obs
             # if global_step % cfg.update_risk_model == 0 and cfg.fine_tune_risk:
             # if cfg.use_risk and (global_step > cfg.start_risk_update and cfg.fine_tune_risk) and global_step % cfg.risk_update_period == 0:
             #     for epoch in range(cfg.num_risk_epochs):
