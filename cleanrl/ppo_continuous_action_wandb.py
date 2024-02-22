@@ -414,7 +414,7 @@ def train_risk(cfg, model, data, criterion, opt, device):
     net_loss = 0
     for batch in dataloader:
         pred = model(get_risk_obs(cfg, batch[0]).to(device))
-        loss = criterion(pred, batch[1])
+        loss = criterion(pred, batch[1].to(device))
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -518,7 +518,7 @@ def train(cfg):
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.model_seed)
     torch.backends.cudnn.deterministic = cfg.torch_deterministic
-    quantiles = [0.01, 0.05, 0.1, 0.2, 0.5]
+    quantiles = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5]
 
     device = torch.device("cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu")
     cfg.device = device
@@ -543,7 +543,7 @@ def train(cfg):
 
     if cfg.use_risk:
         print("using risk")
-        agent = RiskAgent(envs=envs, risk_size=risk_size).to(device)
+        agent = RiskAgent(envs=envs, risk_size=len(quantiles)).to(device)
         risk_model = QRNN(np.array(envs.single_observation_space.shape).prod(), 64, 64, 1, quantiles).to(device)
         
         if os.path.exists(cfg.risk_model_path):
@@ -649,7 +649,7 @@ def train(cfg):
                 with torch.no_grad():
                     next_obs_risk = get_risk_obs(cfg, next_obs)
                     next_risk = torch.Tensor(risk_model(next_obs_risk.to(device))).to(device)
-                print(next_risk)
+                #print(next_risk)
             # ALGO LOGIC: action logic
             with torch.no_grad():
                 if cfg.use_risk:
@@ -709,7 +709,7 @@ def train(cfg):
                 if cfg.use_risk and (global_step > cfg.start_risk_update and cfg.fine_tune_risk) and global_step % cfg.risk_update_period == 0:
                     for epoch in tqdm.tqdm(range(cfg.num_risk_epochs)):
                         total_risk_updates +=1 
-                        print(total_risk_updates)
+                        #print(total_risk_updates)
                         if cfg.finetune_risk_online:
                             print("I am online")
                             data = rb.slice_data(-cfg.risk_batch_size*cfg.num_update_risk, 0)
