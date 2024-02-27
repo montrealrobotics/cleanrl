@@ -33,7 +33,7 @@ class Args:
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "risk-aware-exploration"
     """the wandb's project name"""
-    wandb_entity: str = "kaustubh_umontreal"
+    wandb_entity: str = "manila95"
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
@@ -343,6 +343,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("goals/Avg Ep Goal", np.mean(goal_scores[-100:]))
                 writer.add_scalar("goals/Total Goal Achieved", goal_met, global_step)
 
+                writer.add_scalar("Performance/episodic_cost", ep_cost, global_step)
+                writer.add_scalar("Performance/cummulative_cost", cum_cost, global_step)
                 if args.use_risk and args.fine_tune_risk != "None":
                     e_risks = np.array(list(reversed(range(int(ep_len))))) if cum_cost > 0 else np.array([int(ep_len)]*int(ep_len))
                     # print(risks.size())
