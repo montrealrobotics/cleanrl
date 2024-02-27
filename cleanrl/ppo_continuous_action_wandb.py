@@ -501,7 +501,7 @@ def train(cfg):
     cfg.use_risk = False if cfg.risk_model_path == "None" else True 
 
     import wandb 
-    run = wandb.init(config=vars(cfg), entity="kaustubh_umontreal",
+    run = wandb.init(config=vars(cfg), entity="manila95",
                    project="risk_aware_exploration",
                    monitor_gym=True,
                    sync_tensorboard=True, save_code=True)
@@ -826,8 +826,9 @@ def train(cfg):
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
         #if cfg.risk_type == "discrete":
-        with torch.no_grad():
-            b_risks = risk_model(b_obs)
+        if cfg.use_risk:
+            with torch.no_grad():
+                b_risks = risk_model(b_obs)
         #else:
         #    b_risks = risks.reshape((-1, ) + (1, ))
 
