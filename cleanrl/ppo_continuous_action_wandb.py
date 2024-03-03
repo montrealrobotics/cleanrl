@@ -8,6 +8,7 @@ from distutils.util import strtobool
 
 import safety_gymnasium, panda_gym
 import gymnasium as gym
+import gymnasium_robotics
 import numpy as np
 import torch
 import torch.nn as nn
@@ -205,10 +206,14 @@ class QRNN(nn.Module):
 
 def make_env(cfg, idx, capture_video, run_name, gamma):
     def thunk():
-        if capture_video:
-            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            
+        if "safety" in cfg.env_id.lower():
+            if capture_video:
+                env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            else:
+                env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
         else:
-            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            env = gym.make(cfg.env_id)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
@@ -501,7 +506,7 @@ def train(cfg):
     cfg.use_risk = False if cfg.risk_model_path == "None" else True 
 
     import wandb 
-    run = wandb.init(config=vars(cfg), entity="manila95",
+    run = wandb.init(config=vars(cfg), entity="kaustubh_umontreal",
                    project="risk_aware_exploration",
                    monitor_gym=True,
                    sync_tensorboard=True, save_code=True)
@@ -728,15 +733,16 @@ def train(cfg):
                 if info is None:
                     continue
                 print(ep_risk_penalty)
-                ep_cost = info["cost_sum"]
+                ep_cost = info["cost_sum"] if "safe" in cfg.env_id.lower() else info["cost"]
                 cum_cost += ep_cost
                 ep_len = info["episode"]["l"][0]
                 buffer_num += ep_len
-                goal_met += info["cum_goal_met"]
+                goal_met_ep = info["cum_goal_met"] if "safe" in cfg.env_id.lower() else info["is_success"]
+                goal_met += goal_met_ep
                 #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
                 scores.append(info['episode']['r'])
-                goal_scores.append(info["cum_goal_met"])
-                writer.add_scalar("goals/Ep Goal Achieved ", info["cum_goal_met"], global_step)
+                goal_scores.append(goal_met_ep)
+                writer.add_scalar("goals/Ep Goal Achieved ", goal_met_ep, global_step)
                 writer.add_scalar("goals/Avg Ep Goal", np.mean(goal_scores[-100:]))
                 writer.add_scalar("goals/Total Goal Achieved", goal_met, global_step)
                 ep_goal_met = 0
