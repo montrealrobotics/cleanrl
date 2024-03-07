@@ -206,14 +206,13 @@ class QRNN(nn.Module):
 
 def make_env(cfg, idx, capture_video, run_name, gamma):
     def thunk():
-            
-        if "safety" in cfg.env_id.lower():
+        if "velocity" in cfg.env_id.lower() or "safety" not in cfg.env_id.lower():
+            env = gym.make(cfg.env_id)
+        else:
             if capture_video:
-                env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+                    env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
             else:
                 env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
-        else:
-            env = gym.make(cfg.env_id)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
@@ -733,11 +732,11 @@ def train(cfg):
                 if info is None:
                     continue
                 print(ep_risk_penalty)
-                ep_cost = info["cost_sum"] if "safe" in cfg.env_id.lower() else info["cost"]
+                ep_cost = info["cost"]
                 cum_cost += ep_cost
                 ep_len = info["episode"]["l"][0]
                 buffer_num += ep_len
-                goal_met_ep = info["cum_goal_met"] if "safe" in cfg.env_id.lower() else info["is_success"]
+                goal_met_ep = info["cum_goal_met"] if "safe" in cfg.env_id.lower() and "velocity" not in cfg.env_id.lower() else 0
                 goal_met += goal_met_ep
                 #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
                 scores.append(info['episode']['r'])
@@ -752,7 +751,7 @@ def train(cfg):
                 writer.add_scalar("Results/Avg_Return", avg_mean_score, global_step)
                 torch.save(agent.state_dict(), os.path.join(wandb.run.dir, "policy.pt"))
                 wandb.save("policy.pt")
-                print(f"cummulative_cost={cum_cost}, global_step={global_step}, episodic_return={avg_mean_score}, episode_cost={ep_cost}")
+                print(f"cummulative_cost={cum_cost}, global_step={global_step}, episodic_return={info['episode']['r']}, avg_episodic_return={avg_mean_score}, episode_cost={ep_cost}")
                 if cfg.use_risk:
                     ep_risk = torch.sum(all_risks.squeeze()[last_step:global_step, 0]).item()
                     cum_risk += ep_risk
@@ -769,7 +768,7 @@ def train(cfg):
                 step_log = 0
                 ep_risk_penalty = 0
                 # f_dist_to_fail = torch.Tensor(np.array(list(reversed(range(f_obs.size()[0]))))).to(device) if cost > 0 else torch.Tensor(np.array([f_obs.size()[0]]*f_obs.shape[0])).to(device)
-                e_risks = np.array(list(reversed(range(int(ep_len))))) if cum_cost > 0 else np.array([int(ep_len)]*int(ep_len))
+                e_risks = np.array(list(reversed(range(int(ep_len))))) if terminated else np.array([int(ep_len)]*int(ep_len))
                 # print(risks.size())
                 e_risks = torch.Tensor(e_risks)
                 if cfg.fine_tune_risk != "None" and cfg.use_risk:
