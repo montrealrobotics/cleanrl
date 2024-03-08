@@ -137,9 +137,9 @@ def parse_args():
 def make_env(env_id, seed, idx, capture_video, run_name, safety_info):
     def thunk():
         if capture_video:
-            env = gym.make(env_id, render_mode="rgb_array", safety_info=safety_info)
+            env = gym.make(env_id)#, render_mode="rgb_array", safety_info=safety_info)
         else:
-            env = gym.make(env_id, safety_info=safety_info)
+            env = gym.make(env_id)#, safety_info=safety_info)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
             if idx == 0:
@@ -468,7 +468,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("charts/Total Success", num_successes, global_step)
                 writer.add_scalar("charts/Success rate", np.mean(success_rate[-100:]), global_step)
                 writer.add_scalar("charts/Avg. Return", np.mean(score[-100:]), global_step)
-                writer.add_scalar("cost/ep_cost", info["cum_cost"], global_step)
+                writer.add_scalar("cost/ep_cost", info["cost"], global_step)
                 writer.add_scalar("cost/total_cost", total_cost, global_step)
 
                 e_risks = torch.Tensor(np.array(list(reversed(range(int(ep_len))))) if info["cost"] > 0 else np.array([int(ep_len)]*int(ep_len))).repeat_interleave(2).numpy()
