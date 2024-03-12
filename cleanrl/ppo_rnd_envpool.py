@@ -33,9 +33,9 @@ def parse_args():
         help="if toggled, cuda will be enabled by default")
     parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="if toggled, this experiment will be tracked with Weights and Biases")
-    parser.add_argument("--wandb-project-name", type=str, default="cleanRL",
+    parser.add_argument("--wandb-project-name", type=str, default="risk-aware-exploration",
         help="the wandb's project name")
-    parser.add_argument("--wandb-entity", type=str, default=None,
+    parser.add_argument("--wandb-entity", type=str, default="manila95",
         help="the entity (team) of wandb's project")
     parser.add_argument("--reward-goal", type=float, default=1.0, 
         help="reward to give when the goal is achieved")
@@ -266,7 +266,7 @@ class RewardForwardFilter:
 if __name__ == "__main__":
     args = parse_args()
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-    if args.track:
+    if True:
         import wandb
 
         wandb.init(
@@ -344,6 +344,8 @@ if __name__ == "__main__":
             next_ob = []
     print("End to initialize...")
 
+    total_cost = 0
+
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -405,6 +407,8 @@ if __name__ == "__main__":
                 # Skip the envs that are not done
                 if info is None:
                     continue
+                ep_cost = info["cost"]
+                total_cost += ep_cost
                 avg_returns.append(info["episode"]["r"])
                 epi_ret = np.average(avg_returns)
                 print(f"Episodic Return: {info['episode']['r']}")
@@ -416,7 +420,9 @@ if __name__ == "__main__":
                     global_step,
                 )
                 writer.add_scalar("charts/avg_episodic_return", epi_ret, global_step)
-  
+                writer.add_scalar("charts/episodic_cost", ep_cost, global_step)
+                writer.add_scalar("charts/total_cost", total_cost, global_step)
+
         curiosity_reward_per_env = np.array(
             [discounted_reward.update(reward_per_step) for reward_per_step in curiosity_rewards.cpu().data.numpy().T]
         )
