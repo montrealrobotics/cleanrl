@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 
 import gymnasium as gym
+import panda_gym
 import numpy as np
 import torch
 import torch.nn as nn
@@ -13,7 +14,7 @@ import torch.optim as optim
 import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
-
+from stable_baselines3 import HerReplayBuffer
 
 @dataclass
 class Args:
@@ -49,6 +50,8 @@ class Args:
     """the learning rate of the optimizer"""
     buffer_size: int = int(1e6)
     """the replay memory buffer size"""
+    buffer_type: str = "normal"
+    """ which replay buffer to use (HER or normal)"""
     gamma: float = 0.99
     """the discount factor gamma"""
     tau: float = 0.005
@@ -72,7 +75,9 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gym.make(env_id)
+        # env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
+
         env.action_space.seed(seed)
         return env
 
@@ -83,7 +88,10 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 class QNetwork(nn.Module):
     def __init__(self, env):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
+        obs_shape = env.single_observation_space["observation"].shape[0]\
+                                     + env.single_observation_space["achieved_goal"].shape[0]\
+                                     + env.single_observation_space["desired_goal"].shape[0]
+        self.fc1 = nn.Linear(obs_shape + np.prod(env.single_action_space.shape), 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 1)
 
@@ -98,7 +106,11 @@ class QNetwork(nn.Module):
 class Actor(nn.Module):
     def __init__(self, env):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
+        # print(env.single_observation_space["desired_goal"].shape[0])
+        obs_shape = env.single_observation_space["observation"].shape[0]\
+                                     + env.single_observation_space["achieved_goal"].shape[0]\
+                                     + env.single_observation_space["desired_goal"].shape[0]
+        self.fc1 = nn.Linear(obs_shape, 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc_mu = nn.Linear(256, np.prod(env.single_action_space.shape))
         # action rescaling
@@ -110,10 +122,14 @@ class Actor(nn.Module):
         )
 
     def forward(self, x):
+        # x = process_obs(x)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = torch.tanh(self.fc_mu(x))
         return x * self.action_scale + self.action_bias
+
+def process_obs(obs):
+    return np.concatenate([obs["observation"], obs["achieved_goal"], obs["desired_goal"]], axis=-1)
 
 
 if __name__ == "__main__":
@@ -167,14 +183,26 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.learning_rate)
 
     envs.single_observation_space.dtype = np.float32
-    rb = ReplayBuffer(
+    if args.buffer_type == "her":
+        rb = HerReplayBuffer(
         args.buffer_size,
         envs.single_observation_space,
         envs.single_action_space,
         device,
         handle_timeout_termination=False,
-    )
+        goal_selection_strategy="future"
+        )
+    else:
+        rb = ReplayBuffer(
+            args.buffer_size,
+            envs.single_observation_space,
+            envs.single_action_space,
+            envs,
+            device,
+            handle_timeout_termination=False,
+        )
     start_time = time.time()
+    success, total_cost = [], 0
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
@@ -184,7 +212,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
             with torch.no_grad():
-                actions = actor(torch.Tensor(obs).to(device))
+                actions = actor(torch.Tensor(process_obs(obs)).to(device))
                 actions += torch.normal(0, actor.action_scale * args.exploration_noise)
                 actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
 
@@ -194,7 +222,16 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
-                print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                if "adroit" in args.env_id.lower():
+                    success.append(info["success"])
+                else:
+                    success.append(info["is_success"])
+                if "panda" in args.env_id.lower():
+                    total_cost += info["cost"]
+                    print(f"global_step={global_step}, Success Rate={np.mean(success[-30:])}, Total Cost={total_cost}")
+                else:
+                    print(f"global_step={global_step}, Success Rate={np.mean(success[-30:])}")
+                # print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 break
@@ -213,7 +250,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if global_step > args.learning_starts:
             data = rb.sample(args.batch_size)
             with torch.no_grad():
-                next_state_actions = target_actor(data.next_observations)
+                next_state_actions = target_actor(process_obs(data.next_observations))
                 qf1_next_target = qf1_target(data.next_observations, next_state_actions)
                 next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (qf1_next_target).view(-1)
 
