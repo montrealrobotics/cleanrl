@@ -494,7 +494,7 @@ def train(cfg):
     cfg.use_risk = False if cfg.risk_model_path == "None" else True 
 
     import wandb 
-    run = wandb.init(config=vars(cfg), entity="kaustubh95",
+    run = wandb.init(config=vars(cfg), entity="kaustubh_umontreal",
                    project="risk_aware_exploration",
                    monitor_gym=True,
                    sync_tensorboard=True, save_code=True)
