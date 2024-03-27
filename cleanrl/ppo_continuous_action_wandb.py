@@ -512,7 +512,7 @@ def train(cfg):
     cfg.use_risk = False if cfg.risk_model_path == "None" else True 
 
     import wandb 
-    run = wandb.init(config=vars(cfg), entity="kaustubh95",
+    run = wandb.init(config=vars(cfg), entity="kaustubh_umontreal",
                    project="risk_aware_exploration",
                    monitor_gym=True,
                    sync_tensorboard=True, save_code=True)
@@ -696,7 +696,7 @@ def train(cfg):
                     risk_penalty = torch.Tensor([0.]).to(device)
                 else:
                     risk_penalty = torch.sum(torch.div(risk_prob*cfg.risk_penalty, quantile_means)) 
-                f_risk_penalty.append(risk_penalty.item())
+                #f_risk_penalty.append(risk_penalty.item())
                 # print(next_risk)
                 risks[step] = next_risk
                 all_risks[global_step] = risk_prob#, axis=-1)
@@ -716,6 +716,13 @@ def train(cfg):
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
+            
+            if cfg.use_risk:
+                risk_penalty = risk_prob[:,0] * cfg.risk_penalty
+            
+            #print(risk_penalty)
+            f_risk_penalty.append(risk_penalty.item())
+
             rewards[step] = torch.tensor(reward).to(device).view(-1) - risk_penalty
 
             info_dict = {'reward': reward, 'done': done, 'cost': cost, 'obs': obs} 
