@@ -199,6 +199,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 
+
 class RiskAgent(nn.Module):
     def __init__(self, envs, risk_size=2, linear_size=64, risk_enc_size=12, risk_actor=True, risk_critic=False):
         super().__init__()
@@ -206,6 +207,7 @@ class RiskAgent(nn.Module):
         self.actor_fc1 = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), linear_size))
         self.actor_fc2 = layer_init(nn.Linear(linear_size+risk_enc_size, linear_size))
         self.actor_fc3 = layer_init(nn.Linear(linear_size, np.prod(envs.single_action_space.shape)), std=0.01)
+        self.scale_fc3  = layer_init(nn.Linear(linear_size, np.prod(envs.single_action_space.shape)), std=0.01)
         ## Critic
         self.critic_fc1 = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), linear_size))
         self.critic_fc2 = layer_init(nn.Linear(linear_size+risk_enc_size, linear_size))
@@ -213,6 +215,7 @@ class RiskAgent(nn.Module):
 
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
         self.tanh = nn.Tanh()
+        self.sigmoid = nn.Sigmoid()
 
         self.risk_encoder_actor = nn.Sequential(
             layer_init(nn.Linear(risk_size, 12)),
@@ -223,14 +226,14 @@ class RiskAgent(nn.Module):
             nn.Tanh())
 
 
-
     def forward_actor(self, x, risk):
         risk = self.risk_encoder_actor(risk)
         x = self.tanh(self.actor_fc1(x))
         x = self.tanh(self.actor_fc2(torch.cat([x, risk], axis=1)))
+        scale = self.sigmoid(self.scale_fc3(x))
         x = self.tanh(self.actor_fc3(x))
 
-        return x
+        return x, scale
 
 
     def get_value(self, x, risk):
@@ -242,10 +245,11 @@ class RiskAgent(nn.Module):
         return value
 
     def get_action_and_value(self, x, risk, action=None):
-        action_mean = self.forward_actor(x, risk)
+        action_mean, scale = self.forward_actor(x, risk)
+        # print(scale)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
-        probs = Normal(action_mean, action_std)
+        probs = Normal(action_mean*scale, action_std*scale)
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x, risk)
@@ -512,7 +516,7 @@ def train(cfg):
     cfg.use_risk = False if cfg.risk_model_path == "None" else True 
 
     import wandb 
-    run = wandb.init(config=vars(cfg), entity="kaustubh95",
+    run = wandb.init(config=vars(cfg), entity="kaustubh_umontreal",
                    project="risk_aware_exploration",
                    monitor_gym=True,
                    sync_tensorboard=True, save_code=True)
@@ -793,7 +797,7 @@ def train(cfg):
                 ep_len = info["episode"]["l"][0]
                 buffer_num += ep_len
                 goal_met += info["cum_goal_met"]
-                #print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
+                print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_cost={ep_cost}")
                 scores.append(info['episode']['r'])
                 goal_scores.append(info["cum_goal_met"])
                 writer.add_scalar("goals/Ep Goal Achieved ", info["cum_goal_met"], global_step)
