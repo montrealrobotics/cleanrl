@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 
 import gymnasium as gym
+import safety_gymnasium
 import numpy as np
 import torch
 import torch.nn as nn
@@ -37,6 +38,16 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "Hopper-v4"
     """the environment id of the task"""
+    early_termination: bool = True 
+    """the environment id of the task"""
+    reward_goal: float = 10.0
+    """the environment id of the task"""
+    reward_distance: float = 0.0
+    """the environment id of the task"""
+    failure_penalty: float = 0.0
+    """the environment id of the task"""
+    term_cost: int = 1
+    """the environment id of the task"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
     buffer_size: int = int(1e6)
@@ -64,14 +75,32 @@ class Args:
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
 
+    risk_lr: float = 1e-5
+    """the environment id of the task"""
+    risk_model_path: str = "None"
+    """the environment id of the task"""
+    risk_batch_size: int = 5000
+    """the environment id of the task"""
+    num_risk_epochs: int = 10 
+    """the environment id of the task"""
+    fine_tune_risk: str = "None"
+    """the environment id of the task"""
+    quantile_size: int = 4
+    """the environment id of the task"""
+    quantile_num: int = 10
+    """the environment id of the task"""
+    use_risk: bool = False
+    """the environment id of the task"""
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+
+
+def make_env(cfg, seed, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
+            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
         return env
@@ -178,10 +207,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    envs = gym.vector.SyncVectorEnv([make_env(args, args.seed, 0, args.capture_video, run_name)])
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     max_action = float(envs.single_action_space.high[0])
+    
 
     actor = Actor(envs).to(device)
     qf1 = SoftQNetwork(envs).to(device)
@@ -212,6 +242,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     )
     start_time = time.time()
 
+    avg_ep_goal, total_goal, total_cost, avg_ep_cost = [], 0, 0, []
+
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
@@ -228,6 +260,15 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
+                try:
+                    avg_ep_cost.append(info["cum_cost"])
+                    avg_ep_goal.append(info["cum_goal_met"])
+                    total_cost += info["cum_cost"]
+                    total_goal += info["cum_goal_met"]
+                    writer.add_scalar("goals/Avg Ep Goal", np.mean(avg_ep_goal[-30:]), global_step)
+                    writer.add_scalar("cost/Avg Ep Cost", np.mean(avg_ep_cost[-30:]), global_step)
+                except:
+                    pass
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
