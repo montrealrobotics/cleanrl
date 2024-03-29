@@ -64,6 +64,8 @@ def parse_args():
         help="what kind of sensor is used (same for every environment?)")
     parser.add_argument("--term-cost", type=int, default=1,
         help="how many violations before you terminate")
+    parser.add_argument("--max-steps", type=int, default=1000,
+        help="how many violations before you terminate")
     parser.add_argument("--failure-penalty", type=float, default=0.0,
         help="Reward Penalty when you fail")
     parser.add_argument("--collect-data", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
@@ -174,9 +176,9 @@ def parse_args():
 def make_env(cfg, idx, capture_video, run_name, gamma):
     def thunk():
         if capture_video:
-            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty)
+            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, num_steps=cfg.max_steps)
         else:
-            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty)
+            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, num_steps=cfg.max_steps)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
