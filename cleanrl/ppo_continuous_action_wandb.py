@@ -508,11 +508,11 @@ def get_risk_obs(cfg, next_obs):
 def train(cfg):
     # fmt: on
 
-    risk_bins = np.array([i*cfg.quantile_size for i in range(cfg.quantile_num)])
+    risk_bins = np.array([i*cfg.quantile_size for i in range(cfg.quantile_num+1)])
     cfg.use_risk = False if cfg.risk_model_path == "None" else True 
 
     import wandb 
-    run = wandb.init(config=vars(cfg), entity="kaustubh95",
+    run = wandb.init(config=vars(cfg), entity="kaustubh_umontreal",
                    project="risk_aware_exploration",
                    monitor_gym=True,
                    sync_tensorboard=True, save_code=True)
@@ -758,7 +758,7 @@ def train(cfg):
             #     writer.add_scalar("risk/risk_loss", risk_loss, global_step)
 
             if cfg.fine_tune_risk == "sync" and cfg.use_risk:
-                if cfg.use_risk and buffer_num > cfg.risk_batch_size and cfg.fine_tune_risk:
+                if cfg.use_risk and len(rb) > cfg.risk_batch_size and cfg.fine_tune_risk:
                     if cfg.finetune_risk_online:
                         print("I am online")
                         data = rb.slice_data(-cfg.risk_batch_size, 0)
@@ -854,7 +854,7 @@ def train(cfg):
                         if cfg.risk_type == "binary":
                             rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], (f_risks <= cfg.fear_radius).float(), e_risks.unsqueeze(1))
                         else:
-                            rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], f_risks, f_risks)
+                            rb.add(f_obs[i], f_next_obs[i], f_actions[i], f_rewards[i], f_dones[i], f_costs[i], f_risks_quant, f_risks)
 
                     f_obs[i] = None    
                     f_next_obs[i] = None
