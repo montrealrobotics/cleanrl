@@ -16,6 +16,8 @@ from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
 
+import risk_utils as utils
+
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
@@ -28,9 +30,9 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "risk_aware_exploration"
     """the wandb's project name"""
-    wandb_entity: str = None
+    wandb_entity: str = "kaustubh_umontreal"
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
@@ -91,16 +93,26 @@ class Args:
     """the environment id of the task"""
     use_risk: bool = False
     """the environment id of the task"""
+    num_risk_epochs: int = 10
+    """the environment id of the task"""
+    risk_update_period: int = 10000
+    """the environment id of the task"""
+    start_risk_update: int = 250000
+    """the environment id of the task"""
+    risk_data_size: int = 10000
 
 
 
 def make_env(cfg, seed, idx, capture_video, run_name):
     def thunk():
-        if capture_video and idx == 0:
-            env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        if "safety" in cfg.env_id:
+            if capture_video and idx == 0:
+                env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+            else:
+                env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
         else:
-            env = gym.make(cfg.env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
+            env = gym.make(cfg.env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
         return env
@@ -110,15 +122,21 @@ def make_env(cfg, seed, idx, capture_video, run_name):
 
 # ALGO LOGIC: initialize agent here:
 class SoftQNetwork(nn.Module):
-    def __init__(self, env):
+    def __init__(self, env, risk_size=0):
         super().__init__()
         self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
-        self.fc2 = nn.Linear(256, 256)
+        self.fc2 = nn.Linear(256, 256) if risk_size == 0 else nn.Linear(320, 256)
         self.fc3 = nn.Linear(256, 1)
 
-    def forward(self, x, a):
+        if risk_size > 0:
+            self.fc_risk = nn.Linear(risk_size, 64)
+
+    def forward(self, x, a, risk=None):
         x = torch.cat([x, a], 1)
         x = F.relu(self.fc1(x))
+        if risk is not None:
+            risk = F.relu(self.fc_risk(risk))
+            x = torch.cat([x, risk], axis=-1)
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
         return x
@@ -129,12 +147,15 @@ LOG_STD_MIN = -5
 
 
 class Actor(nn.Module):
-    def __init__(self, env):
+    def __init__(self, env, risk_size=0):
         super().__init__()
         self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
-        self.fc2 = nn.Linear(256, 256)
+        self.fc2 = nn.Linear(256, 256) if risk_size == 0 else nn.Linear(320, 256)
         self.fc_mean = nn.Linear(256, np.prod(env.single_action_space.shape))
         self.fc_logstd = nn.Linear(256, np.prod(env.single_action_space.shape))
+
+        if risk_size > 0:
+            self.fc_risk = nn.Linear(risk_size, 64)
         # action rescaling
         self.register_buffer(
             "action_scale", torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32)
@@ -143,8 +164,10 @@ class Actor(nn.Module):
             "action_bias", torch.tensor((env.action_space.high + env.action_space.low) / 2.0, dtype=torch.float32)
         )
 
-    def forward(self, x):
+    def forward(self, x, risk):
         x = F.relu(self.fc1(x))
+        if risk is not None:
+            x = torch.cat([x, F.relu(self.fc_risk(risk))], axis=-1)
         x = F.relu(self.fc2(x))
         mean = self.fc_mean(x)
         log_std = self.fc_logstd(x)
@@ -153,8 +176,8 @@ class Actor(nn.Module):
 
         return mean, log_std
 
-    def get_action(self, x):
-        mean, log_std = self(x)
+    def get_action(self, x, risk=None):
+        mean, log_std = self(x, risk)
         std = log_std.exp()
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
@@ -212,12 +235,12 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     max_action = float(envs.single_action_space.high[0])
     
-
-    actor = Actor(envs).to(device)
-    qf1 = SoftQNetwork(envs).to(device)
-    qf2 = SoftQNetwork(envs).to(device)
-    qf1_target = SoftQNetwork(envs).to(device)
-    qf2_target = SoftQNetwork(envs).to(device)
+    risk_size = args.quantile_num if args.use_risk else 0
+    actor = Actor(envs, risk_size).to(device)
+    qf1 = SoftQNetwork(envs, risk_size).to(device)
+    qf2 = SoftQNetwork(envs, risk_size).to(device)
+    qf1_target = SoftQNetwork(envs, risk_size).to(device)
+    qf2_target = SoftQNetwork(envs, risk_size).to(device)
     qf1_target.load_state_dict(qf1.state_dict())
     qf2_target.load_state_dict(qf2.state_dict())
     q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
@@ -240,10 +263,23 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         device,
         handle_timeout_termination=False,
     )
+
+    if args.use_risk:
+        risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])
+
+        risk_model = utils.BayesRiskEst(np.array(envs.single_observation_space.shape).prod(), risk_size=args.quantile_num)
+        risk_model.to(device)
+        if args.fine_tune_risk:
+            risk_rb = utils.ReplayBuffer()
+            risk_criterion = nn.NLLLoss()
+            opt_risk = optim.Adam(risk_model.parameters(), lr=args.risk_lr, eps=1e-8)
+        
+
     start_time = time.time()
 
     avg_ep_goal, total_goal, total_cost, avg_ep_cost = [], 0, 0, []
 
+    f_obs = None
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
@@ -251,11 +287,21 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if global_step < args.learning_starts:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
-            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
+            risk = risk_model(torch.Tensor(obs).to(device)) if args.use_risk else None
+            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device), risk)
             actions = actions.detach().cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
+
+        if args.use_risk and args.fine_tune_risk:
+            f_obs = torch.Tensor(next_obs).reshape(1, -1) if f_obs is None else torch.cat([f_obs, torch.Tensor(next_obs).reshape(1, -1)], axis=0)
+            # print(f_obs.size())
+            ### Updating the risk model parameters
+            if global_step >= args.start_risk_update and global_step % args.risk_update_period == 0:
+                risk_data = risk_rb.sample(args.risk_data_size)
+                risk_loss = utils.train_risk(args, risk_model, risk_data, risk_criterion, opt_risk, args.num_risk_epochs, device)
+                
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
@@ -269,6 +315,15 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                     writer.add_scalar("cost/Avg Ep Cost", np.mean(avg_ep_cost[-30:]), global_step)
                 except:
                     pass
+
+                if args.use_risk and args.fine_tune_risk:
+                    f_dist_to_fail = range(info["episode"]["l"][0]) if terminations else [100]*info["episode"]["l"][0]
+                    f_risks = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_dist_to_fail, 1)))
+                    f_dist_to_fail = torch.Tensor(f_dist_to_fail)
+                    print()
+                    risk_rb.add(f_obs, f_risks, f_dist_to_fail)
+                    f_obs = None
+
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
@@ -288,14 +343,16 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if global_step > args.learning_starts:
             data = rb.sample(args.batch_size)
             with torch.no_grad():
-                next_state_actions, next_state_log_pi, _ = actor.get_action(data.next_observations)
-                qf1_next_target = qf1_target(data.next_observations, next_state_actions)
-                qf2_next_target = qf2_target(data.next_observations, next_state_actions)
+                next_risk = risk_model(data.next_observations) if args.use_risk else None
+                risk = risk_model(data.observations) if args.use_risk else None
+                next_state_actions, next_state_log_pi, _ = actor.get_action(data.next_observations, next_risk)
+                qf1_next_target = qf1_target(data.next_observations, next_state_actions, next_risk)
+                qf2_next_target = qf2_target(data.next_observations, next_state_actions, next_risk)
                 min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
                 next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
 
-            qf1_a_values = qf1(data.observations, data.actions).view(-1)
-            qf2_a_values = qf2(data.observations, data.actions).view(-1)
+            qf1_a_values = qf1(data.observations, data.actions, risk).view(-1)
+            qf2_a_values = qf2(data.observations, data.actions, risk).view(-1)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
             qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
             qf_loss = qf1_loss + qf2_loss
@@ -309,9 +366,9 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 for _ in range(
                     args.policy_frequency
                 ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                    pi, log_pi, _ = actor.get_action(data.observations)
-                    qf1_pi = qf1(data.observations, pi)
-                    qf2_pi = qf2(data.observations, pi)
+                    pi, log_pi, _ = actor.get_action(data.observations, risk)
+                    qf1_pi = qf1(data.observations, pi, risk)
+                    qf2_pi = qf2(data.observations, pi, risk)
                     min_qf_pi = torch.min(qf1_pi, qf2_pi)
                     actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
 
@@ -321,7 +378,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
                     if args.autotune:
                         with torch.no_grad():
-                            _, log_pi, _ = actor.get_action(data.observations)
+                            _, log_pi, _ = actor.get_action(data.observations, risk)
                         alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
 
                         a_optimizer.zero_grad()
