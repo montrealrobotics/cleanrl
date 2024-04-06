@@ -105,7 +105,7 @@ class Args:
 
 def make_env(cfg, seed, idx, capture_video, run_name):
     def thunk():
-        if "safety" in cfg.env_id:
+        if "safety" in cfg.env_id.lower():
             if capture_video and idx == 0:
                 env = gym.make(cfg.env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
                 env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
@@ -307,12 +307,13 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if "final_info" in infos:
             for info in infos["final_info"]:
                 try:
-                    avg_ep_cost.append(info["cum_cost"])
+                    avg_ep_cost.append(info["cost_sum"])
                     avg_ep_goal.append(info["cum_goal_met"])
-                    total_cost += info["cum_cost"]
+                    total_cost += info["cost_sum"]
                     total_goal += info["cum_goal_met"]
                     writer.add_scalar("goals/Avg Ep Goal", np.mean(avg_ep_goal[-30:]), global_step)
                     writer.add_scalar("cost/Avg Ep Cost", np.mean(avg_ep_cost[-30:]), global_step)
+                    writer.add_scalar("cost/Total cost", total_cost, global_step)
                 except:
                     pass
 
