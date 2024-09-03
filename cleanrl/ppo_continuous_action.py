@@ -13,6 +13,9 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 
+from src.utils import* 
+from src.models.risk_models import * 
+
 
 @dataclass
 class Args:
@@ -76,12 +79,31 @@ class Args:
     """the target KL divergence threshold"""
 
     # to be filled in runtime
-    batch_size: int = 0
+    batch_size: int = 256
     """the batch size (computed in runtime)"""
-    minibatch_size: int = 0
+    minibatch_size: int = 64
     """the mini-batch size (computed in runtime)"""
-    num_iterations: int = 0
+    num_iterations: int = 5
     """the number of iterations (computed in runtime)"""
+
+    # risk parameters 
+    use_risk: bool = False 
+    """the batch size (computed in runtime)"""
+    fine_tune_risk: bool = False 
+    """the batch size (computed in runtime)"""
+    risk_lr: float = 1e-6
+    """the batch size (computed in runtime)"""
+    risk_batch_size: int = 512
+    """the batch size (computed in runtime)"""
+    risk_update_period: int = 10 
+    """the batch size (computed in runtime)"""
+    quantile_num: int = 10
+    """the batch size (computed in runtime)"""
+    quantile_size: int = 4 
+
+    ## Failure penalty
+    failure_penalty: float = 0
+
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma):
@@ -110,35 +132,52 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class Agent(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, envs, use_risk=False, risk_size=10, fc_size=64):
         super().__init__()
+        if use_risk:
+            self.risk_actor = layer_init(nn.Linear(risk_size, 12))
+            self.risk_critic = layer_init(nn.Linear(risk_size, 12))
+            fc_size = 64 + 12
+
+        self.activation = nn.Tanh()
+        self.obs_enc_critic = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64))
+        self.obs_enc_actor = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64))
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(fc_size, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(fc_size, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
-    def get_value(self, x):
+    def get_value(self, x, risk):
+        x = self.obs_enc_critic(x)
+        x = self.activation(x)
+        if risk is not None:
+            risk = self.risk_critic(risk)
+            risk = self.activation(risk)
+            x = torch.cat([x, risk], axis=-1)
+
         return self.critic(x)
 
-    def get_action_and_value(self, x, action=None):
+    def get_action_and_value(self, obs, action=None, risk=None):
+        x = self.obs_enc_actor(obs)
+        x = self.activation(x)
+        if risk is not None:
+            x1 = self.risk_actor(risk)
+            x1 = self.activation(x1)
+            x = torch.cat([x, x1], axis=-1)
         action_mean = self.actor_mean(x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(obs, risk)
 
 
 if __name__ == "__main__":
@@ -179,7 +218,19 @@ if __name__ == "__main__":
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    agent = Agent(envs).to(device)
+    # Risk setup 
+    if args.use_risk:
+        risk_model = BayesRiskEst(obs_size=np.array(envs.single_observation_space.shape).prod(), batch_norm=True, out_size=args.quantile_num)
+
+        if args.fine_tune_risk:
+            risk_rb = ReplayBuffer()
+            risk_opt = optim.Adam(risk_model.parameters(), lr=args.risk_lr)
+            risk_criterion = nn.NLLLoss()
+            risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])
+        
+        risk_model.eval()
+
+    agent = Agent(envs, use_risk=args.use_risk, risk_size=args.quantile_num).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -197,6 +248,9 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
+    f_next_obs = None
+    num_terminations = 0
+
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -211,27 +265,54 @@ if __name__ == "__main__":
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                next_risk = risk_model(next_obs) if args.use_risk else None
+                action, logprob, _, value = agent.get_action_and_value(next_obs, None, next_risk)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+            reward += terminations * args.failure_penalty
+            num_terminations += np.sum(terminations)
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
+            if args.use_risk and args.fine_tune_risk:
+                f_next_obs = next_obs.unsqueeze(0) if f_next_obs is None else torch.cat([f_next_obs, next_obs.unsqueeze(0)], axis=0)
+            
+            if args.use_risk and args.fine_tune_risk and len(risk_rb) > 0 and global_step % args.risk_update_period == 0:
+                risk_model.train()
+                risk_data = risk_rb.sample(args.risk_batch_size)
+                pred = risk_model(risk_data["next_obs"].squeeze().to(device))
+                risk_loss = risk_criterion(pred, torch.argmax(risk_data["risks"].squeeze(), axis=1).to(device))
+                risk_opt.zero_grad()
+                risk_loss.backward()
+                risk_opt.step()
+                writer.add_scalar("charts/risk_loss", risk_loss.item(), global_step)
+                risk_model.eval()  
+
             if "final_info" in infos:
-                for info in infos["final_info"]:
+                for i, info in enumerate(infos["final_info"]):
                     if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}, total_terminations={num_terminations}")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                        writer.add_scalar("charts/Failures", num_terminations, global_step)
+
+                        if args.use_risk and args.fine_tune_risk:
+                            f_risks = np.linspace(info["episode"]["l"][0]-1, 0, info["episode"]["l"][0]) if terminations[i] else np.array([1000]*info["episode"]["l"][0])
+                            # f_risks = torch.from_numpy(f_risks).to(device)
+                            f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks, 1))).to(device)
+                            risk_rb.add(None, f_next_obs, None, None, None, None, f_risks_quant, torch.from_numpy(f_risks).to(device))
+
+                            f_next_obs = None 
 
         # bootstrap value if not done
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
+            next_risk = risk_model(next_obs) if args.use_risk else None
+            next_value = agent.get_value(next_obs, next_risk).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -253,6 +334,9 @@ if __name__ == "__main__":
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
+        with torch.no_grad():
+            b_risks = risk_model(b_obs) if args.use_risk else None
+
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
@@ -262,7 +346,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds], b_risks[mb_inds] if b_risks is not None else None)
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
