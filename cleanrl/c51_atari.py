@@ -114,7 +114,7 @@ class QNetwork(nn.Module):
         self.n_atoms = n_atoms
         self.register_buffer("atoms", torch.linspace(v_min, v_max, steps=n_atoms))
         self.n = env.single_action_space.n
-        self.network = nn.Sequential(
+        self.img_enc = nn.Sequential(
             nn.Conv2d(4, 32, 8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2),
@@ -122,13 +122,17 @@ class QNetwork(nn.Module):
             nn.Conv2d(64, 64, 3, stride=1),
             nn.ReLU(),
             nn.Flatten(),
+        )
+
+        self.rest = nn.Sequential(
             nn.Linear(3136, 512),
             nn.ReLU(),
             nn.Linear(512, self.n * n_atoms),
         )
 
     def get_action(self, x, action=None):
-        logits = self.network(x / 255.0)
+        img_x = self.img_enc(x / 255.0)
+        logits = self.rest(img_x)
         # probability mass function for each action
         pmfs = torch.softmax(logits.view(len(x), self.n, self.n_atoms), dim=2)
         q_values = (pmfs * self.atoms).sum(2)

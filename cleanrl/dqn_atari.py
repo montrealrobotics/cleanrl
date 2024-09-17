@@ -21,6 +21,7 @@ from stable_baselines3.common.atari_wrappers import (
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
+import src.utils as utils
 
 @dataclass
 class Args:
@@ -76,6 +77,8 @@ class Args:
     """timestep to start learning"""
     train_frequency: int = 4
     """the frequency of training"""
+    quantile_size: int = 4
+    quantile_num: int = 10 
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -105,9 +108,9 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
-    def __init__(self, env):
+    def __init__(self, env, risk_size=10):
         super().__init__()
-        self.network = nn.Sequential(
+        self.img_enc = nn.Sequential(
             nn.Conv2d(4, 32, 8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2),
@@ -115,13 +118,25 @@ class QNetwork(nn.Module):
             nn.Conv2d(64, 64, 3, stride=1),
             nn.ReLU(),
             nn.Flatten(),
+        )
+
+        self.rest = nn.Sequential(
             nn.Linear(3136, 512),
             nn.ReLU(),
             nn.Linear(512, env.single_action_space.n),
         )
 
+        self.risk = nn.Sequential(
+            nn.Linear(3136, 512),
+            nn.ReLU(),
+            nn.Linear(512, risk_size),
+        )
+        self.logsoftmax = nn.LogSoftmax()
+
     def forward(self, x):
-        return self.network(x / 255.0)
+        img_x = self.img_enc(x / 255.0)
+        return self.rest(img_x), self.logsoftmax(self.risk(img_x))
+        
 
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
@@ -187,8 +202,13 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         optimize_memory_usage=True,
         handle_timeout_termination=False,
     )
-    start_time = time.time()
 
+    risk_rb = utils.ReplayBuffer()
+    risk_bins = np.array([i*args.quantile_size for i in range(args.quantile_num+1)])    
+    criterion = nn.NLLLoss()
+
+    start_time = time.time()
+    f_next_obs = [None]*args.num_envs
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
@@ -197,16 +217,24 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if random.random() < epsilon:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
-            q_values = q_network(torch.Tensor(obs).to(device))
+            q_values, _ = q_network(torch.Tensor(obs).to(device))
             actions = torch.argmax(q_values, dim=1).cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
-
+        next_obs_torch = torch.from_numpy(next_obs)
+        for i in range(args.num_envs):
+            f_next_obs[i] = next_obs_torch[i].unsqueeze(0) if f_next_obs[i] is None else torch.cat([f_next_obs[i], next_obs_torch[i].unsqueeze(0)], axis=0)
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
-            for info in infos["final_info"]:
+            for i, info in enumerate(infos["final_info"]):
                 if info and "episode" in info:
+                    f_risks = np.linspace(info["episode"]["l"][0]-1, 0, info["episode"]["l"][0]) if terminations[i] else np.array([1000]*info["episode"]["l"][0])
+                    # f_risks = torch.from_numpy(f_risks).to(device)
+                    f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks, 1))).to(device)
+                    risk_rb.add(None, f_next_obs[i], None, None, None, None, f_risks_quant, torch.from_numpy(f_risks).to(device))
+
+                    f_next_obs[i] = None 
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                     writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
@@ -225,11 +253,20 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if global_step > args.learning_starts:
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
+                risk_data = risk_rb.sample(args.batch_size)
                 with torch.no_grad():
-                    target_max, _ = target_network(data.next_observations).max(dim=1)
+                    target_val, _ = target_network(data.next_observations)
+                    target_max, _ = target_val.max(dim=1)
                     td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
-                old_val = q_network(data.observations).gather(1, data.actions).squeeze()
+                old_val, old_risk = q_network(data.observations)
+                old_val = old_val.gather(1, data.actions).squeeze()
                 loss = F.mse_loss(td_target, old_val)
+
+                _, risk_pred = q_network(risk_data["next_obs"])
+                risk_loss = criterion(risk_pred, torch.argmax(risk_data["risks"].squeeze(), axis=1).to(device))
+
+                loss += risk_loss
+
 
                 if global_step % 100 == 0:
                     writer.add_scalar("losses/td_loss", loss, global_step)
