@@ -23,6 +23,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import src.utils as utils
 
+from buffers import * 
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
@@ -198,6 +199,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         args.buffer_size,
         envs.single_observation_space,
         envs.single_action_space,
+        args.quantile_num,
         device,
         optimize_memory_usage=True,
         handle_timeout_termination=False,
@@ -229,11 +231,13 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if "final_info" in infos:
             for i, info in enumerate(infos["final_info"]):
                 if info and "episode" in info:
-                    f_risks = np.linspace(info["episode"]["l"][0]-1, 0, info["episode"]["l"][0]) if terminations[i] else np.array([1000]*info["episode"]["l"][0])
+                    ep_len = f_next_obs[i].shape[0]
+                    f_risks = np.linspace(ep_len-1, 0, ep_len) if terminations[i] else np.array([1000]*ep_len)
                     # f_risks = torch.from_numpy(f_risks).to(device)
-                    f_risks_quant = torch.Tensor(np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks, 1))).to(device)
-                    risk_rb.add(None, f_next_obs[i], None, None, None, None, f_risks_quant, torch.from_numpy(f_risks).to(device))
-
+                    f_risks_quant = np.apply_along_axis(lambda x: np.histogram(x, bins=risk_bins)[0], 1, np.expand_dims(f_risks, 1))
+                    #risk_rb.add(None, f_next_obs[i], None, None, None, None, f_risks_quant, torch.from_numpy(f_risks).to(device))
+                    print("episode length", info['episode']['l'])
+                    rb.add_risks(f_risks_quant)
                     f_next_obs[i] = None 
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                     writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
@@ -252,8 +256,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
             if global_step % args.train_frequency == 0:
-                data = rb.sample(args.batch_size)
-                risk_data = risk_rb.sample(args.batch_size)
+                data, true_risks = rb.sample(args.batch_size)
+                #risk_data = risk_rb.sample(args.batch_size)
                 with torch.no_grad():
                     target_val, _ = target_network(data.next_observations)
                     target_max, _ = target_val.max(dim=1)
@@ -262,13 +266,14 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 old_val = old_val.gather(1, data.actions).squeeze()
                 loss = F.mse_loss(td_target, old_val)
 
-                _, risk_pred = q_network(risk_data["next_obs"])
-                risk_loss = criterion(risk_pred, torch.argmax(risk_data["risks"].squeeze(), axis=1).to(device))
+                _, risk_pred = q_network(data.next_observations)
+                risk_loss = criterion(risk_pred, torch.argmax(true_risks, axis=1).to(device))
 
                 loss += risk_loss
 
 
                 if global_step % 100 == 0:
+                    writer.add_scalar("losses/risk_loss", risk_loss, global_step)
                     writer.add_scalar("losses/td_loss", loss, global_step)
                     writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
                     print("SPS:", int(global_step / (time.time() - start_time)))
