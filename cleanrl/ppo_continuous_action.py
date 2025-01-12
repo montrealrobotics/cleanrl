@@ -12,7 +12,9 @@ import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
-
+import safety_gymnasium
+from stable_baselines3.common.buffers import ReplayBuffer
+from torch.functional import F
 
 @dataclass
 class Args:
@@ -83,14 +85,29 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
+    ## Safety Gym arguments
+    early_termination: bool = False
+    """whether to terminate the episode early"""
+    term_cost: int = 1
+    """the cost of early termination"""
+    failure_penalty: int = 0
+    """the penalty for failing"""
+    reward_goal: int = 10
+    """the reward for reaching the goal"""
+    reward_distance: int = 0
+    """the reward for moving closer to the goal"""
 
-def make_env(env_id, idx, capture_video, run_name, gamma):
+    ## IDM arguments
+    idm_reset_prob: float = 0.0001
+
+
+def make_env(cfg, env_id, idx, capture_video, run_name, gamma):
     def thunk():
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.make(env_id, render_mode="rgb_array", early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
+            env = gym.make(env_id, early_termination=cfg.early_termination, term_cost=cfg.term_cost, failure_penalty=cfg.failure_penalty, reward_goal=cfg.reward_goal, reward_distance=cfg.reward_distance)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
@@ -108,6 +125,19 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class IDM(nn.Module):
+    def __init__(self, envs):
+        super().__init__()
+        self.idm = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod()*2, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=1.0),
+        )
+
+    def forward(self, x):
+        return self.idm(x)
 
 class Agent(nn.Module):
     def __init__(self, envs):
@@ -126,11 +156,13 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
         )
+
+
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
     def get_value(self, x):
         return self.critic(x)
-
+    
     def get_action_and_value(self, x, action=None):
         action_mean = self.actor_mean(x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
@@ -140,6 +172,11 @@ class Agent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
+
+# Function to reset model weights
+def reset_weights(m):
+    if hasattr(m, 'reset_parameters'):
+        m.reset_parameters()
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -175,13 +212,23 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)]
+        [make_env(args, args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
+    idm = IDM(envs).to(device)
+
+    idm_optimizer = optim.Adam(idm.parameters(), lr=args.learning_rate, eps=1e-5)
+    rb = ReplayBuffer(
+        1000000,
+        envs.single_observation_space,
+        envs.single_action_space,
+        device,
+        handle_timeout_termination=False,
+    )
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
@@ -196,6 +243,8 @@ if __name__ == "__main__":
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
+
+    ep_reward = 0.0
 
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
@@ -219,15 +268,37 @@ if __name__ == "__main__":
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
             next_done = np.logical_or(terminations, truncations)
+
+            # Calculate curiosity reward
+            reward = torch.norm(idm(torch.cat((torch.Tensor(obs[step]).to(device), torch.Tensor(next_obs).to(device)), 1)) - action, 1)
+            ep_reward += reward
+            rb.add(obs[step].cpu().numpy(), next_obs, action.detach().cpu().numpy(), reward.detach().cpu().numpy(), terminations, infos)
+
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+
+
+            data = rb.sample(args.batch_size)
+            idm_input = torch.cat((data.observations, data.next_observations), 1).float()
+            idm_output = idm(idm_input)
+            idm_loss = F.mse_loss(idm_output, data.actions)
+            idm_optimizer.zero_grad()
+            idm_loss.backward()
+            idm_optimizer.step()
+            
+            if np.random.random() < args.idm_reset_prob:
+                idm.apply(reset_weights)
+                idm_optimizer = optim.Adam(idm.parameters(), lr=args.learning_rate, eps=1e-5)
+
 
             if "final_info" in infos:
                 for info in infos["final_info"]:
                     if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                        print(f"global_step={global_step}, episodic_return={ep_reward.item()}")
+                        writer.add_scalar("charts/episodic_return", ep_reward.item(), global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+
+                        ep_reward = 0.0
 
         # bootstrap value if not done
         with torch.no_grad():
