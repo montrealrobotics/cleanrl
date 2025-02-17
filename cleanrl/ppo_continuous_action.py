@@ -46,7 +46,7 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 1   
     """the number of parallel game environments"""
     num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
@@ -83,6 +83,13 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
+    # Reset arguments 
+    replay_ratio: int = 1
+    """the ratio of updates to data in the replay buffer"""
+    use_resets: bool = False
+    """whether to use resets"""
+    reset_interval: int = 200000
+    """the interval at which to reset the environment"""
 
 def make_env(env_id, idx, capture_video, run_name, gamma):
     def thunk():
