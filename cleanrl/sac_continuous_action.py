@@ -2,7 +2,8 @@
 import os
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 import gymnasium as gym
 import numpy as np
@@ -61,6 +62,16 @@ class Args:
     """Entropy regularization coefficient."""
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
+    replay_ratio: float = 1.0
+    """Number of updates per environment step. If > 1, performs multiple updates per step."""
+    reset_interval: int = 200000
+    """How often (in environment steps) to perform parameter resets"""
+    reset_layers: List[str] = field(default_factory=lambda: ["fc3"])
+    """Names of layers to reset (default is last layer of each network)"""
+    reset_critic: bool = True
+    """Whether to reset critic networks"""
+    reset_actor: bool = True
+    """Whether to reset actor network"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -84,6 +95,17 @@ class SoftQNetwork(nn.Module):
         self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 1)
+        self.layer_init_states = {
+            'fc1': self.fc1.state_dict(),
+            'fc2': self.fc2.state_dict(),
+            'fc3': self.fc3.state_dict()
+        }
+
+    def reset_layers(self, layer_names):
+        """Reset specified layers to their initial states"""
+        for name in layer_names:
+            if name in self.layer_init_states:
+                getattr(self, name).load_state_dict(self.layer_init_states[name])
 
     def forward(self, x, a):
         x = torch.cat([x, a], 1)
@@ -104,6 +126,15 @@ class Actor(nn.Module):
         self.fc2 = nn.Linear(256, 256)
         self.fc_mean = nn.Linear(256, np.prod(env.single_action_space.shape))
         self.fc_logstd = nn.Linear(256, np.prod(env.single_action_space.shape))
+        
+        # Store initial states for reset
+        self.layer_init_states = {
+            'fc1': self.fc1.state_dict(),
+            'fc2': self.fc2.state_dict(),
+            'fc_mean': self.fc_mean.state_dict(),
+            'fc_logstd': self.fc_logstd.state_dict()
+        }
+        
         # action rescaling
         self.register_buffer(
             "action_scale", torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32)
@@ -111,6 +142,12 @@ class Actor(nn.Module):
         self.register_buffer(
             "action_bias", torch.tensor((env.action_space.high + env.action_space.low) / 2.0, dtype=torch.float32)
         )
+
+    def reset_layers(self, layer_names):
+        """Reset specified layers to their initial states"""
+        for name in layer_names:
+            if name in self.layer_init_states:
+                getattr(self, name).load_state_dict(self.layer_init_states[name])
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
@@ -243,55 +280,77 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
-            data = rb.sample(args.batch_size)
-            with torch.no_grad():
-                next_state_actions, next_state_log_pi, _ = actor.get_action(data.next_observations)
-                qf1_next_target = qf1_target(data.next_observations, next_state_actions)
-                qf2_next_target = qf2_target(data.next_observations, next_state_actions)
-                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
-                next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
+            # Check if it's time to reset parameters
+            if global_step % args.reset_interval == 0:
+                if args.reset_critic:
+                    qf1.reset_layers(args.reset_layers)
+                    qf2.reset_layers(args.reset_layers)
+                    # Reset target networks as well
+                    qf1_target.reset_layers(args.reset_layers)
+                    qf2_target.reset_layers(args.reset_layers)
+                    print(f"Reset critic networks at step {global_step}")
+                
+                if args.reset_actor:
+                    actor.reset_layers(args.reset_layers)
+                    print(f"Reset actor network at step {global_step}")
+                    
+                writer.add_scalar("charts/parameter_resets", global_step, global_step)
+            
+            # Calculate number of updates to perform this step
+            num_updates = int(args.replay_ratio)
+            # Add remaining fractional updates probabilistically    
+            if random.random() < (args.replay_ratio - int(args.replay_ratio)):
+                num_updates += 1
+                
+            for _ in range(num_updates):
+                data = rb.sample(args.batch_size)
+                # Q-function update
+                with torch.no_grad():
+                    next_state_actions, next_state_log_pi, _ = actor.get_action(data.next_observations)
+                    qf1_next_target = qf1_target(data.next_observations, next_state_actions)
+                    qf2_next_target = qf2_target(data.next_observations, next_state_actions)
+                    min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
+                    next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
 
-            qf1_a_values = qf1(data.observations, data.actions).view(-1)
-            qf2_a_values = qf2(data.observations, data.actions).view(-1)
-            qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
-            qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
-            qf_loss = qf1_loss + qf2_loss
+                qf1_a_values = qf1(data.observations, data.actions).view(-1)
+                qf2_a_values = qf2(data.observations, data.actions).view(-1)
+                qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
+                qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
+                qf_loss = qf1_loss + qf2_loss
 
-            # optimize the model
-            q_optimizer.zero_grad()
-            qf_loss.backward()
-            q_optimizer.step()
+                # optimize the model
+                q_optimizer.zero_grad()
+                qf_loss.backward()
+                q_optimizer.step()
 
-            if global_step % args.policy_frequency == 0:  # TD 3 Delayed update support
-                for _ in range(
-                    args.policy_frequency
-                ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                    pi, log_pi, _ = actor.get_action(data.observations)
-                    qf1_pi = qf1(data.observations, pi)
-                    qf2_pi = qf2(data.observations, pi)
-                    min_qf_pi = torch.min(qf1_pi, qf2_pi)
-                    actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
+                if global_step % args.policy_frequency == 0:  # TD 3 Delayed update support
+                    for _ in range(args.policy_frequency):
+                        pi, log_pi, _ = actor.get_action(data.observations)
+                        qf1_pi = qf1(data.observations, pi)
+                        qf2_pi = qf2(data.observations, pi)
+                        min_qf_pi = torch.min(qf1_pi, qf2_pi)
+                        actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
 
-                    actor_optimizer.zero_grad()
-                    actor_loss.backward()
-                    actor_optimizer.step()
+                        actor_optimizer.zero_grad()
+                        actor_loss.backward()
+                        actor_optimizer.step()
 
-                    if args.autotune:
-                        with torch.no_grad():
-                            _, log_pi, _ = actor.get_action(data.observations)
-                        alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
+                        if args.autotune:
+                            with torch.no_grad():
+                                _, log_pi, _ = actor.get_action(data.observations)
+                            alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
 
-                        a_optimizer.zero_grad()
-                        alpha_loss.backward()
-                        a_optimizer.step()
-                        alpha = log_alpha.exp().item()
+                            a_optimizer.zero_grad()
+                            alpha_loss.backward()
+                            a_optimizer.step()
+                            alpha = log_alpha.exp().item()
 
-            # update the target networks
-            if global_step % args.target_network_frequency == 0:
-                for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
-                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
-                for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
-                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+                # update the target networks
+                if global_step % args.target_network_frequency == 0:
+                    for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
+                        target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+                    for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
+                        target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
             if global_step % 100 == 0:
                 writer.add_scalar("losses/qf1_values", qf1_a_values.mean().item(), global_step)
