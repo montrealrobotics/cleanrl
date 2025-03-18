@@ -45,7 +45,7 @@ class Args:
     """the discount factor gamma"""
     tau: float = 0.005
     """target smoothing coefficient (default: 0.005)"""
-    batch_size: int = 256   
+    batch_size: int = 256
     """the batch size of sample from the reply memory"""
     learning_starts: int = 5e3
     """timestep to start learning"""
@@ -62,7 +62,7 @@ class Args:
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
 
-    # Reset arguments 
+    # Reset arguments
     replay_ratio: int = 1
     """the ratio of updates to data in the replay buffer"""
     use_resets: str = "False"
@@ -72,7 +72,26 @@ class Args:
 
     # Safety arguments
     failure_penalty: float = 0.0
+    """Penalty applied when the agent terminates"""
+    lambda_lr: float = 1e-3
+    """Learning rate for the Lagrangian multiplier"""
+    cost_limit: float = 0.05
+    """Maximum acceptable cost (failure rate)"""
+    safety_alpha: float = 0.2
+    """Entropy regularization coefficient for the safety critic."""
+    pid_kp: float = 0.1
+    """Proportional gain for the PID controller"""
+    pid_ki: float = 0.00001
+    """Integral gain for the PID controller"""
+    pid_kd: float = 0.00001
+    """Derivative gain for the PID controller"""
+    lambda_init: float = 1.0
+    """Initial value for the Lagrangian multiplier"""
+
+    ## Overestimation / Underestimation
     value_evaluation_period: int = 100000
+    """Evaluate Q-values every x steps  """
+    
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -88,7 +107,9 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 
     return thunk
 
-def evaluate_value_estimates(env, actor, qf1, qf2, device, safety=False, num_episodes=10, max_steps=1000):
+
+
+def evaluate_value_estimates(env, actor, qf1, qf2, alpha, device, safety=False, num_episodes=10, max_steps=1000):
     """
     Evaluates Q-value overestimation by comparing Q-values to Monte Carlo returns.
     
@@ -117,11 +138,14 @@ def evaluate_value_estimates(env, actor, qf1, qf2, device, safety=False, num_epi
         # Get initial action and Q-value
         with torch.no_grad():
             state = torch.FloatTensor(obs).to(device)
-            action, _, _ = actor.get_action(state.unsqueeze(0))
-            q1 = qf1(state.unsqueeze(0), action)
+            action, log_pi, _ = actor.get_action(state.unsqueeze(0))
+            q1 = qf1(state.unsqueeze(0), action) 
             q2 = qf2(state.unsqueeze(0), action)
-            q_value = torch.min(q1, q2).item()
-        
+            if not safety:
+                q_value = (torch.min(q1, q2) + alpha * log_pi).item()
+            else:
+                q_value = torch.max(q1, q2).item()
+
         q_values.append(q_value)
         
         # Run episode and collect rewards
@@ -168,9 +192,63 @@ class SoftQNetwork(nn.Module):
         return x
 
 
+class SafetyQNetwork(nn.Module):
+    def __init__(self, env):
+        super().__init__()
+        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, 1)  # Output is the expected cost
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x, a):
+        x = torch.cat([x, a], 1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.sigmoid(self.fc3(x))
+        return x
+
+
 LOG_STD_MAX = 2
 LOG_STD_MIN = -5
 
+class PIDLambdaController:
+    def __init__(self, kp=0.1, ki=0.01, kd=0.001, setpoint=0.0, min_lambda=0.0, max_lambda=float('inf'), lambda_init=0.0):
+        self.kp = kp  # Proportional gain
+        self.ki = ki  # Integral gain 
+        self.kd = kd  # Derivative gain
+        self.setpoint = setpoint  # Target cost limit
+        self.min_lambda = min_lambda
+        self.max_lambda = max_lambda
+        
+        # Internal state
+        self.prev_error = 0.0
+        self.integral = 0.0
+        self.lambda_value = lambda_init
+        
+    def update(self, current_cost):
+        # print(f"current_cost: {current_cost}")
+        # Calculate error
+        error = current_cost - self.setpoint
+        
+        # Update integral term
+        self.integral += error
+        
+        # Calculate derivative term
+        derivative = error - self.prev_error
+        self.prev_error = error
+        
+        # print(f"error: {error}")
+        # print(f"derivative: {derivative}")
+        # print(f"integral: {self.integral}")
+        # PID formula
+        lambda_value = (self.kp * error + 
+                       self.ki * self.integral + 
+                       self.kd * derivative)
+        
+        # Clamp lambda between min and max values
+        self.lambda_value = self.lambda_value + max(self.min_lambda, min(self.max_lambda, lambda_value))
+        
+        return self.lambda_value
 
 class Actor(nn.Module):
     def __init__(self, env):
@@ -266,6 +344,22 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
     actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr)
 
+    # Safety components
+    safety_qf1 = SafetyQNetwork(envs).to(device)
+    safety_qf2 = SafetyQNetwork(envs).to(device)
+    safety_qf1_target = SafetyQNetwork(envs).to(device)
+    safety_qf2_target = SafetyQNetwork(envs).to(device)
+    safety_qf1_target.load_state_dict(safety_qf1.state_dict())
+    safety_qf2_target.load_state_dict(safety_qf2.state_dict())
+    safety_q_optimizer = optim.Adam(list(safety_qf1.parameters()) + list(safety_qf2.parameters()), lr=args.q_lr)
+
+    lambda_controller = PIDLambdaController(kp=args.pid_kp, ki=args.pid_ki, kd=args.pid_kd, setpoint=args.cost_limit, min_lambda=0.0, max_lambda=float('inf'), lambda_init=args.lambda_init)
+    lambda_value = args.lambda_init
+    # # Lagrangian dual variable
+    # log_lambda = torch.zeros(1, requires_grad=True, device=device)
+    # lambda_optimizer = optim.Adam([log_lambda], lr=args.lambda_lr)
+    # lambda_value = log_lambda.exp().item()
+
     # Automatic entropy tuning
     if args.autotune:
         target_entropy = -torch.prod(torch.Tensor(envs.single_action_space.shape).to(device)).item()
@@ -287,8 +381,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
-    total_failures = 0
-    episode_failures = 0
+    total_failures = 0  
+    episode_failures = []
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
@@ -300,27 +394,24 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
+        # Modify the reward based on termination
+        costs = terminations.astype(float)  # Cost is 1 if terminated, 0 otherwise
         rewards = np.where(terminations, args.failure_penalty, rewards)
-        total_failures += np.sum(terminations)
-        episode_failures += np.sum(terminations)
-        if global_step % args.value_evaluation_period == 0:
-            # Evaluate reward Q-values
-            mean_q_error, mean_q_values, mean_mc_values = evaluate_value_estimates(
-                envs.envs[0], actor, qf1, qf2, device
-            )
-            writer.add_scalar("ValueEstimation/mean_q_error", mean_q_error, global_step)
-            writer.add_scalar("ValueEstimation/mean_q_values", mean_q_values, global_step)
-            writer.add_scalar("ValueEstimation/mean_mc_values", mean_mc_values, global_step)
 
+        total_failures += np.sum(terminations)
+        
         # TRY NOT TO MODIFY: record rewards for plotting purposes'
         if "final_info" in infos:
             for info in infos["final_info"]:
-                print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                episode_failures.append(np.sum(terminations))
+                print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_failures={np.mean(episode_failures[-10:])}, lambda_value={lambda_value}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                 writer.add_scalar("charts/total_failures", total_failures, global_step)
-                writer.add_scalar("charts/episode_failures", episode_failures, global_step)
-                episode_failures = 0
+                writer.add_scalar("charts/episode_failures", np.sum(terminations), global_step)
+                writer.add_scalar("Lagrange/lambda", lambda_value, global_step)
+                if False:
+                    lambda_value = lambda_controller.update(np.mean(episode_failures[-10:])) 
                 break
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
@@ -329,6 +420,24 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             if trunc:
                 real_next_obs[idx] = infos["final_observation"][idx]
         rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
+
+
+        if global_step % args.value_evaluation_period == 0:
+            # Evaluate reward Q-values
+            mean_q_error, mean_q_values, mean_mc_values = evaluate_value_estimates(
+                envs.envs[0], actor, qf1, qf2, alpha, device
+            )
+            writer.add_scalar("ValueEstimation/mean_q_error", mean_q_error, global_step)
+            writer.add_scalar("ValueEstimation/mean_q_values", mean_q_values, global_step)
+            writer.add_scalar("ValueEstimation/mean_mc_values", mean_mc_values, global_step)
+
+            # Evaluate safety Q-values
+            mean_safety_q_error, mean_safety_q_values, mean_safety_mc_values = evaluate_value_estimates(
+                envs.envs[0], actor, safety_qf1, safety_qf2, alpha, device, True 
+            )
+            writer.add_scalar("ValueEstimation/mean_safety_q_error", mean_safety_q_error, global_step)
+            writer.add_scalar("ValueEstimation/mean_safety_q_values", mean_safety_q_values, global_step)
+            writer.add_scalar("ValueEstimation/mean_safety_mc_values", mean_safety_mc_values, global_step)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
@@ -342,7 +451,13 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             qf2_target.load_state_dict(qf2.state_dict())
             q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
             actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr)
-
+            safety_qf1 = SafetyQNetwork(envs).to(device)
+            safety_qf2 = SafetyQNetwork(envs).to(device)
+            safety_qf1_target = SafetyQNetwork(envs).to(device)
+            safety_qf2_target = SafetyQNetwork(envs).to(device)
+            safety_qf1_target.load_state_dict(safety_qf1.state_dict())
+            safety_qf2_target.load_state_dict(safety_qf2.state_dict())
+            safety_q_optimizer = optim.Adam(list(safety_qf1.parameters()) + list(safety_qf2.parameters()), lr=args.q_lr)
 
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
@@ -355,16 +470,34 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                     min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
                     next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
 
+                    # Safety critic target
+                    safety_qf1_next_target = safety_qf1_target(data.next_observations, next_state_actions)
+                    safety_qf2_next_target = safety_qf2_target(data.next_observations, next_state_actions)
+                    min_safety_qf_next_target = torch.max(safety_qf1_next_target, safety_qf2_next_target) #- args.safety_alpha * next_state_log_pi  # Consider safety_alpha
+
+                    next_cost_value = data.dones.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_safety_qf_next_target).view(-1)
+
                 qf1_a_values = qf1(data.observations, data.actions).view(-1)
                 qf2_a_values = qf2(data.observations, data.actions).view(-1)
                 qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
                 qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
                 qf_loss = qf1_loss + qf2_loss
 
-                # optimize the model
+                # Safety critic loss
+                safety_qf1_a_values = safety_qf1(data.observations, data.actions).view(-1)
+                safety_qf2_a_values = safety_qf2(data.observations, data.actions).view(-1)
+                safety_qf1_loss = F.mse_loss(safety_qf1_a_values, next_cost_value)
+                safety_qf2_loss = F.mse_loss(safety_qf2_a_values, next_cost_value)
+                safety_q_loss = safety_qf1_loss + safety_qf2_loss
+
+                # Optimize the Q networks
                 q_optimizer.zero_grad()
                 qf_loss.backward()
                 q_optimizer.step()
+
+                safety_q_optimizer.zero_grad()
+                safety_q_loss.backward()
+                safety_q_optimizer.step()
 
                 if global_step % args.policy_frequency == 0:  # TD 3 Delayed update support
                     for _ in range(
@@ -375,6 +508,13 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                         qf2_pi = qf2(data.observations, pi)
                         min_qf_pi = torch.min(qf1_pi, qf2_pi)
                         actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
+
+                        # Safety component in actor loss
+                        safety_qf1_pi = safety_qf1(data.observations, pi)
+                        safety_qf2_pi = safety_qf2(data.observations, pi)
+                        min_safety_qf_pi = torch.max(safety_qf1_pi, safety_qf2_pi)
+
+                        actor_loss += lambda_value * min_safety_qf_pi.mean()  # Lagrangian term
 
                         actor_optimizer.zero_grad()
                         actor_loss.backward()
@@ -390,12 +530,32 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                             a_optimizer.step()
                             alpha = log_alpha.exp().item()
 
-                # update the target networks
+                # Update the target networks
                 if global_step % args.target_network_frequency == 0:
                     for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
                         target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
                     for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
                         target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+
+                    # Update safety critic target networks
+                    for param, target_param in zip(safety_qf1.parameters(), safety_qf1_target.parameters()):
+                        target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+                    for param, target_param in zip(safety_qf2.parameters(), safety_qf2_target.parameters()):
+                        target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+
+                # Lagrangian dual variable update
+                # with torch.no_grad():
+                # cost = safety_qf1_a_values.mean()  # Estimate the cost
+                # lambda_loss = -log_lambda * (cost.detach() - args.cost_limit)
+
+                # lambda_optimizer.zero_grad()
+                # lambda_loss.backward()
+                # lambda_optimizer.step()
+                # lambda_value = log_lambda.exp().item()
+                # lambda_value = max(0, lambda_value)  # Enforce non-negativity
+            # print(f"episode_failures: {np.mean(episode_failures[-10:])}")
+            
+            # print(f"lambda_value: {lambda_value}")
 
             if global_step % 100 == 0:
                 writer.add_scalar("losses/qf1_values", qf1_a_values.mean().item(), global_step)
@@ -405,6 +565,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, global_step)
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
                 writer.add_scalar("losses/alpha", alpha, global_step)
+                writer.add_scalar("losses/lambda", lambda_value, global_step)
+                writer.add_scalar("losses/safety_qf1_loss", safety_qf1_loss.item(), global_step)
+                writer.add_scalar("losses/safety_qf2_loss", safety_qf2_loss.item(), global_step)
+                writer.add_scalar("losses/safety_q_loss", safety_q_loss.item() / 2.0, global_step)
                 print("SPS:", int(global_step / (time.time() - start_time)))
                 writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
                 if args.autotune:
