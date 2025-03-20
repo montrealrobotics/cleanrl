@@ -26,11 +26,11 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    track: bool = False
+    track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "conservatism_in_rl"
     """the wandb's project name"""
-    wandb_entity: str = None
+    wandb_entity: str = "kaustubh95"
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
@@ -60,18 +60,21 @@ class Args:
     """the frequency of updates for the target nerworks"""
     alpha: float = 0.2
     """Entropy regularization coefficient."""
-    autotune: bool = True
+    autotune: str = "True"
     """automatic tuning of the entropy coefficient"""
     replay_ratio: float = 1.0
     """Number of updates per environment step. If > 1, performs multiple updates per step."""
     reset_interval: int = 200000
     """How often (in environment steps) to perform parameter resets"""
-    reset_layers: List[str] = field(default_factory=lambda: ["fc3"])
+    reset_layers: List[str] = field(default_factory=lambda: ["fc1", "fc2", "fc3"])
     """Names of layers to reset (default is last layer of each network)"""
     reset_critic: bool = True
     """Whether to reset critic networks"""
     reset_actor: bool = True
     """Whether to reset actor network"""
+    use_resets: str = "True"
+    """Whether to use resets at all"""
+    value_evaluation_period: int = 100000
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -86,6 +89,95 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         return env
 
     return thunk
+
+def initialize_networks(env, device):
+    # Initialize the actor and critics
+    actor = Actor(env).to(device)
+    qf1 = SoftQNetwork(env).to(device)
+    qf2 = SoftQNetwork(env).to(device)
+
+    # Initialize target networks 
+    qf1_target = SoftQNetwork(env).to(device)
+    qf2_target = SoftQNetwork(env).to(device)
+
+    # Copy parameters from critics to targets
+    for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
+        target_param.data.copy_(param.data)
+    for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
+        target_param.data.copy_(param.data)
+
+    # Set target networks to eval mode
+    qf1_target.eval() 
+    qf2_target.eval()
+
+    # Initialize optimizers
+    q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
+    actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr)
+
+    return actor, qf1, qf2, qf1_target, qf2_target, q_optimizer, actor_optimizer
+
+def evaluate_value_estimates(env, actor, qf1, qf2, device, safety=False, num_episodes=10, max_steps=1000):
+    """
+    Evaluates Q-value overestimation by comparing Q-values to Monte Carlo returns.
+    
+    Args:
+        env: The environment to evaluate in
+        actor: The policy network
+        qf1, qf2: The Q-networks
+        device: The device to run computations on
+        num_episodes: Number of episodes to average over
+        max_steps: Maximum steps per episode
+        
+    Returns:
+        mean_q_error: Average error between Q-values and MC returns
+        mean_q_values: Average predicted Q-values
+        mean_mc_values: Average Monte Carlo returns
+    """
+    q_values = []
+    mc_returns = []
+    
+    for episode in range(num_episodes):
+        obs, _ = env.reset()
+        done = False
+        step = 0
+        episode_rewards = []
+        
+        # Get initial action and Q-value
+        with torch.no_grad():
+            state = torch.FloatTensor(obs).to(device)
+            action, _, _ = actor.get_action(state.unsqueeze(0))
+            q1 = qf1(state.unsqueeze(0), action)
+            q2 = qf2(state.unsqueeze(0), action)
+            q_value = torch.min(q1, q2).item()
+        
+        q_values.append(q_value)
+        
+        # Run episode and collect rewards
+        while not done and step < max_steps:
+            action = action.squeeze().detach().cpu().numpy()
+            obs, reward, terminated, truncated, _ = env.step(action)
+            if safety:
+                reward = int(terminated)
+            done = terminated or truncated
+            episode_rewards.append(reward)
+            step += 1
+            
+            if not done:
+                with torch.no_grad():
+                    state = torch.FloatTensor(obs).to(device)
+                    action, _, _ = actor.get_action(state.unsqueeze(0))
+        
+        # Calculate Monte Carlo return
+        mc_return = 0
+        for r in reversed(episode_rewards):
+            mc_return = r + args.gamma * mc_return
+        mc_returns.append(mc_return)
+    
+    mean_q_error = np.mean(np.array(q_values) - np.array(mc_returns))
+    mean_q_values = np.mean(q_values)
+    mean_mc_values = np.mean(mc_returns)
+    
+    return mean_q_error, mean_q_values, mean_mc_values
 
 
 # ALGO LOGIC: initialize agent here:
@@ -144,6 +236,7 @@ class Actor(nn.Module):
         )
 
     def reset_layers(self, layer_names):
+        layer_names = layer_names + ["fc_mean", "fc_logstd"]
         """Reset specified layers to their initial states"""
         for name in layer_names:
             if name in self.layer_init_states:
@@ -197,12 +290,16 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             name=run_name,
             monitor_gym=True,
             save_code=True,
+            settings={"_service_wait": 60}
         )
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
+
+    args.use_resets = True if args.use_resets == "True" else False
+    args.autotune = True if args.autotune == "True" else False
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -218,15 +315,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     max_action = float(envs.single_action_space.high[0])
 
-    actor = Actor(envs).to(device)
-    qf1 = SoftQNetwork(envs).to(device)
-    qf2 = SoftQNetwork(envs).to(device)
-    qf1_target = SoftQNetwork(envs).to(device)
-    qf2_target = SoftQNetwork(envs).to(device)
-    qf1_target.load_state_dict(qf1.state_dict())
-    qf2_target.load_state_dict(qf2.state_dict())
-    q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
-    actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr)
+    actor, qf1, qf2, qf1_target, qf2_target, q_optimizer, actor_optimizer = initialize_networks(envs, device)
 
     # Automatic entropy tuning
     if args.autotune:
@@ -249,6 +338,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
+    total_terminations = 0  # Initialize counter
+    
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
@@ -260,12 +351,26 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
+        # Track terminations
+        total_terminations += sum(terminations)
+            
+        if global_step % args.value_evaluation_period == 0:
+            # Evaluate reward Q-values
+            mean_q_error, mean_q_values, mean_mc_values = evaluate_value_estimates(
+                envs.envs[0], actor, qf1, qf2, device
+            )
+            writer.add_scalar("ValueEstimation/mean_q_error", mean_q_error, global_step)
+            writer.add_scalar("ValueEstimation/mean_q_values", mean_q_values, global_step)
+            writer.add_scalar("ValueEstimation/mean_mc_values", mean_mc_values, global_step)
+
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                 writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                writer.add_scalar("charts/total_terminations", total_terminations, global_step)
+                writer.add_scalar("charts/episodic_terminations", np.mean(terminations), global_step)
                 break
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
@@ -281,19 +386,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
             # Check if it's time to reset parameters
-            if global_step % args.reset_interval == 0:
-                if args.reset_critic:
-                    qf1.reset_layers(args.reset_layers)
-                    qf2.reset_layers(args.reset_layers)
-                    # Reset target networks as well
-                    qf1_target.reset_layers(args.reset_layers)
-                    qf2_target.reset_layers(args.reset_layers)
-                    print(f"Reset critic networks at step {global_step}")
-                
-                if args.reset_actor:
-                    actor.reset_layers(args.reset_layers)
-                    print(f"Reset actor network at step {global_step}")
-                    
+            if global_step % args.reset_interval == 0 and args.use_resets:
+                # Reinitialize networks
+                actor, qf1, qf2, qf1_target, qf2_target, q_optimizer, actor_optimizer = initialize_networks(envs, device)
+                print(f"Reinitialized networks at step {global_step}")
                 writer.add_scalar("charts/parameter_resets", global_step, global_step)
             
             # Calculate number of updates to perform this step
