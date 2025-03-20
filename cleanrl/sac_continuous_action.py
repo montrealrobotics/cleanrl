@@ -25,7 +25,7 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    track: str = True
+    track: str = "True"
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "conservatism_in_rl"
     """the wandb's project name"""
@@ -59,7 +59,7 @@ class Args:
     """the frequency of updates for the target nerworks"""
     alpha: float = 0.2
     """Entropy regularization coefficient."""
-    autotune: bool = True
+    autotune: str = "True"
     """automatic tuning of the entropy coefficient"""
 
     # Reset arguments 
@@ -224,7 +224,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     args = tyro.cli(Args)
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-    if args.track:
+    if args.track == "True":
         import wandb
 
         wandb.init(
@@ -236,11 +236,14 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             monitor_gym=True,
             save_code=True,
         )
+        os.environ["WANDB_API_KEY"] = "7643119a72d175de7cb1183948b69392d8d9d3e9"
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
+
+    args.autotune = True if args.autotune == "True" else False 
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
