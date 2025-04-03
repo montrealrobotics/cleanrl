@@ -14,7 +14,8 @@ import torch.optim as optim
 import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
-
+from utils import *
+import pickle as pkl
 
 @dataclass
 class Args:
@@ -72,9 +73,15 @@ class Args:
     """Whether to reset critic networks"""
     reset_actor: bool = True
     """Whether to reset actor network"""
-    use_resets: str = "True"
+    use_resets: str = "False"
     """Whether to use resets at all"""
-    value_evaluation_period: int = 100000
+    value_evaluation_period: int = 50000
+    
+    ## Experimental Arguments
+    use_entropy_critic: str = "True"
+    """Whether to use entropy term in the critic loss"""
+    use_cdq: str = "True"
+    """Whether to use clipped double Q-learning"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -84,11 +91,58 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gym.make(env_id)
+        
         env = gym.wrappers.RecordEpisodeStatistics(env)
+        env = MuJoCoStateWrapper(env)
         env.action_space.seed(seed)
         return env
 
     return thunk
+
+
+
+class MuJoCoStateWrapper(gym.Env):
+    def __init__(self, env):
+        super().__init__()
+        self.env = env
+        self.saved_state = None
+
+    def save_state(self):
+        """Save the current state of the environment."""
+        self.saved_state = {
+            "qpos": self.env.data.qpos.copy(),
+            "qvel": self.env.data.qvel.copy(),
+            "cinert": self.env.data.cinert.copy(),
+            "cvel": self.env.data.cvel.copy(),
+            "qfrc_actuator": self.env.data.qfrc_actuator.copy(),
+            "cfrc_ext": self.env.data.cfrc_ext.copy(),
+        }
+
+    def reset(self, use_saved_state=False, **kwargs):
+        if use_saved_state and self.saved_state is not None:
+            # Reset to the saved state
+            self.env.set_state(self.saved_state["qpos"], self.saved_state["qvel"])
+            self.env.data.cinert[:] = self.saved_state["cinert"]
+            self.env.data.cvel[:] = self.saved_state["cvel"]
+            self.env.data.qfrc_actuator[:] = self.saved_state["qfrc_actuator"]
+            self.env.data.cfrc_ext[:] = self.saved_state["cfrc_ext"]
+            observation = self.env.unwrapped._get_obs()
+            info = {}
+        else:
+            observation, info = self.env.reset(**kwargs)
+        return observation, info
+
+    def step(self, action):
+        return self.env.step(action)
+
+    def render(self, mode='human'):
+        return self.env.render(mode)
+
+    def close(self):
+        self.env.close()
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
 
 def initialize_networks(env, device):
     # Initialize the actor and critics
@@ -115,69 +169,6 @@ def initialize_networks(env, device):
     actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr)
 
     return actor, qf1, qf2, qf1_target, qf2_target, q_optimizer, actor_optimizer
-
-def evaluate_value_estimates(env, actor, qf1, qf2, device, safety=False, num_episodes=10, max_steps=1000):
-    """
-    Evaluates Q-value overestimation by comparing Q-values to Monte Carlo returns.
-    
-    Args:
-        env: The environment to evaluate in
-        actor: The policy network
-        qf1, qf2: The Q-networks
-        device: The device to run computations on
-        num_episodes: Number of episodes to average over
-        max_steps: Maximum steps per episode
-        
-    Returns:
-        mean_q_error: Average error between Q-values and MC returns
-        mean_q_values: Average predicted Q-values
-        mean_mc_values: Average Monte Carlo returns
-    """
-    q_values = []
-    mc_returns = []
-    
-    for episode in range(num_episodes):
-        obs, _ = env.reset()
-        done = False
-        step = 0
-        episode_rewards = []
-        
-        # Get initial action and Q-value
-        with torch.no_grad():
-            state = torch.FloatTensor(obs).to(device)
-            action, _, _ = actor.get_action(state.unsqueeze(0))
-            q1 = qf1(state.unsqueeze(0), action)
-            q2 = qf2(state.unsqueeze(0), action)
-            q_value = torch.min(q1, q2).item()
-        
-        q_values.append(q_value)
-        
-        # Run episode and collect rewards
-        while not done and step < max_steps:
-            action = action.squeeze().detach().cpu().numpy()
-            obs, reward, terminated, truncated, _ = env.step(action)
-            if safety:
-                reward = int(terminated)
-            done = terminated or truncated
-            episode_rewards.append(reward)
-            step += 1
-            
-            if not done:
-                with torch.no_grad():
-                    state = torch.FloatTensor(obs).to(device)
-                    action, _, _ = actor.get_action(state.unsqueeze(0))
-        
-        # Calculate Monte Carlo return
-        mc_return = 0
-        for r in reversed(episode_rewards):
-            mc_return = r + args.gamma * mc_return
-        mc_returns.append(mc_return)
-    
-    mean_q_error = np.mean(np.array(q_values) - np.array(mc_returns))
-    mean_q_values = np.mean(q_values)
-    mean_mc_values = np.mean(mc_returns)
-    
-    return mean_q_error, mean_q_values, mean_mc_values
 
 
 # ALGO LOGIC: initialize agent here:
@@ -356,13 +347,32 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             
         if global_step % args.value_evaluation_period == 0:
             # Evaluate reward Q-values
-            mean_q_error, mean_q_values, mean_mc_values = evaluate_value_estimates(
-                envs.envs[0], actor, qf1, qf2, device
+            results = evaluate_value_estimates(
+                args, envs.envs[0], actor, qf1, qf2, device
             )
-            writer.add_scalar("ValueEstimation/mean_q_error", mean_q_error, global_step)
-            writer.add_scalar("ValueEstimation/mean_q_values", mean_q_values, global_step)
-            writer.add_scalar("ValueEstimation/mean_mc_values", mean_mc_values, global_step)
+            analyze_estimation(writer, global_step, results)
+            with open(os.path.join(wandb.run.dir, f"evaluation_results_{global_step}.pkl"), "wb") as f: 
+                pkl.dump(results, f)
+            
+            wandb.save(os.path.join(wandb.run.dir, f"evaluation_results_{global_step}.pkl"))
 
+            writer.add_scalar("ValueEstimation/mean_q_error", results["mean_q_error"], global_step)
+            writer.add_scalar("ValueEstimation/mean_q_values", results["mean_q_values"], global_step)
+            writer.add_scalar("ValueEstimation/mean_mc_values", results["mean_mc_values"], global_step)
+            # writer.add_scalar("ValueEstimation/mean_q_error", mean_q_error, global_step)
+            # writer.add_scalar("ValueEstimation/mean_q_values", mean_q_values, global_step)
+            # writer.add_scalar("ValueEstimation/mean_mc_values", mean_mc_values, global_step)
+            # writer.add_scalar("ValueEstimation/mean_q_mean_error", mean_q_mean_error, global_step)
+            # writer.add_scalar("ValueEstimation/var_error_corr", var_error_corr, global_step)
+            # writer.add_scalar("ValueEstimation/mean_var", mean_var, global_step)
+
+
+            # writer.add_scalar("ValueRel/mean_q_error", mean_q_error / mean_mc_values, global_step)
+            # writer.add_scalar("ValueRel/mean_q_values", mean_q_values / mean_mc_values, global_step)
+            # writer.add_scalar("ValueRel/mean_mc_values", mean_mc_values / mean_mc_values, global_step)
+            # writer.add_scalar("ValueRel/mean_q_mean_error", mean_q_mean_error / mean_mc_values, global_step)
+            # writer.add_scalar("ValueRel/mean_var", mean_var / mean_mc_values, global_step)
+            # writer.add_scalar("ValueRel/var_error_corr", var_error_corr, global_step)
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
@@ -405,14 +415,24 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                     next_state_actions, next_state_log_pi, _ = actor.get_action(data.next_observations)
                     qf1_next_target = qf1_target(data.next_observations, next_state_actions)
                     qf2_next_target = qf2_target(data.next_observations, next_state_actions)
-                    min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
+                    if args.use_cdq == "True":
+                        if args.use_entropy_critic == "True":
+                            min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
+                        else:
+                            min_qf_next_target = torch.min(qf1_next_target, qf2_next_target)
+                    else:
+                        if args.use_entropy_critic == "True":
+                            min_qf_next_target = qf1_next_target - alpha * next_state_log_pi
+                        else:
+                            min_qf_next_target = qf1_next_target
+
                     next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
 
                 qf1_a_values = qf1(data.observations, data.actions).view(-1)
                 qf2_a_values = qf2(data.observations, data.actions).view(-1)
                 qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
                 qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
-                qf_loss = qf1_loss + qf2_loss
+                qf_loss = qf1_loss + int(args.use_cdq == "True") * qf2_loss
 
                 # optimize the model
                 q_optimizer.zero_grad()
@@ -424,7 +444,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                         pi, log_pi, _ = actor.get_action(data.observations)
                         qf1_pi = qf1(data.observations, pi)
                         qf2_pi = qf2(data.observations, pi)
-                        min_qf_pi = torch.min(qf1_pi, qf2_pi)
+                        if args.use_cdq == "True":
+                            min_qf_pi = torch.min(qf1_pi, qf2_pi)
+                        else:
+                            min_qf_pi = qf1_pi
                         actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
 
                         actor_optimizer.zero_grad()
