@@ -387,6 +387,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                         qf2_pi = qf2(data.observations, pi)
                         if args.use_cdq == "True":
                             min_qf_pi = torch.min(qf1_pi, qf2_pi)
+                        elif args.use_cdq == "beta":
+                            min_qf_pi = (qf1_pi + qf1_pi) / 2 + args.beta * torch.abs(qf1_pi - qf2_pi) / 2
                         else:
                             min_qf_pi = qf1_pi
                         actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
