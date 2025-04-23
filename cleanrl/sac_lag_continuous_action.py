@@ -95,6 +95,10 @@ class Args:
     """Whether to use CDQ or not"""
     use_entropy_critic: bool = False
     """Whether to use entropy critic or not"""
+    independent_q_reward: str = "False"
+    """Whether to train reward Q-networks independently"""
+    independent_q_safety: str = "False"
+    """Whether to train safety Q-networks independently"""
     
 
 
@@ -110,74 +114,6 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         return env
 
     return thunk
-
-
-
-# def evaluate_value_estimates(env, actor, qf1, qf2, alpha, device, safety=False, num_episodes=10, max_steps=1000):
-#     """
-#     Evaluates Q-value overestimation by comparing Q-values to Monte Carlo returns.
-    
-#     Args:
-#         env: The environment to evaluate in
-#         actor: The policy network
-#         qf1, qf2: The Q-networks
-#         device: The device to run computations on
-#         num_episodes: Number of episodes to average over
-#         max_steps: Maximum steps per episode
-        
-#     Returns:
-#         mean_q_error: Average error between Q-values and MC returns
-#         mean_q_values: Average predicted Q-values
-#         mean_mc_values: Average Monte Carlo returns
-#     """
-#     q_values = []
-#     mc_returns = []
-    
-#     for episode in range(num_episodes):
-#         obs, _ = env.reset()
-#         done = False
-#         step = 0
-#         episode_rewards = []
-        
-#         # Get initial action and Q-value
-#         with torch.no_grad():
-#             state = torch.FloatTensor(obs).to(device)
-#             action, log_pi, _ = actor.get_action(state.unsqueeze(0))
-#             q1 = qf1(state.unsqueeze(0), action) 
-#             q2 = qf2(state.unsqueeze(0), action)
-#             if not safety:
-#                 q_value = (torch.min(q1, q2) + alpha * log_pi).item()
-#             else:
-#                 q_value = torch.max(q1, q2).item()
-
-#         q_values.append(q_value)
-        
-#         # Run episode and collect rewards
-#         while not done and step < max_steps:
-#             action = action.squeeze().detach().cpu().numpy()
-#             obs, reward, terminated, truncated, _ = env.step(action)
-#             if safety:
-#                 reward = int(terminated)
-#             done = terminated or truncated
-#             episode_rewards.append(reward)
-#             step += 1
-            
-#             if not done:
-#                 with torch.no_grad():
-#                     state = torch.FloatTensor(obs).to(device)
-#                     action, _, _ = actor.get_action(state.unsqueeze(0))
-        
-#         # Calculate Monte Carlo return
-#         mc_return = 0
-#         for r in reversed(episode_rewards):
-#             mc_return = r + args.gamma * mc_return
-#         mc_returns.append(mc_return)
-    
-#     mean_q_error = np.mean(np.array(q_values) - np.array(mc_returns))
-#     mean_q_values = np.mean(q_values)
-#     mean_mc_values = np.mean(mc_returns)
-    
-#     return mean_q_error, mean_q_values, mean_mc_values
 
 
 # ALGO LOGIC: initialize agent here:
@@ -324,6 +260,9 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
+    args.independent_q_reward = args.independent_q_reward == "True"
+    args.independent_q_safety = args.independent_q_safety == "True"
+
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -469,15 +408,28 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
                 qf1_a_values = qf1(data.observations, data.actions).view(-1)
                 qf2_a_values = qf2(data.observations, data.actions).view(-1)
-                qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
-                qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
+                if args.independent_q_reward:
+                    next_q1_values = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * qf1_next_target.view(-1)
+                    next_q2_values = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * qf2_next_target.view(-1)
+                    qf1_loss = F.mse_loss(qf1_a_values, next_q1_values)
+                    qf2_loss = F.mse_loss(qf2_a_values, next_q2_values)
+                else:
+                    qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
+                    qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
                 qf_loss = qf1_loss + qf2_loss
 
                 # Safety critic loss
                 safety_qf1_a_values = safety_qf1(data.observations, data.actions).view(-1)
                 safety_qf2_a_values = safety_qf2(data.observations, data.actions).view(-1)
-                safety_qf1_loss = F.mse_loss(safety_qf1_a_values, next_cost_value)
-                safety_qf2_loss = F.mse_loss(safety_qf2_a_values, next_cost_value)
+
+                if args.independent_q_safety:
+                    next_cost1_value = data.dones.flatten() + (1 - data.dones.flatten()) * args.gamma * safety_qf1_next_target.view(-1)
+                    next_cost2_value = data.dones.flatten() + (1 - data.dones.flatten()) * args.gamma * safety_qf2_next_target.view(-1)
+                    safety_qf1_loss = F.mse_loss(safety_qf1_a_values, next_cost1_value)
+                    safety_qf2_loss = F.mse_loss(safety_qf2_a_values, next_cost2_value)
+                else:
+                    safety_qf1_loss = F.mse_loss(safety_qf1_a_values, next_cost_value)
+                    safety_qf2_loss = F.mse_loss(safety_qf2_a_values, next_cost_value)
                 safety_q_loss = safety_qf1_loss + safety_qf2_loss
 
                 # Optimize the Q networks

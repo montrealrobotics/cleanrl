@@ -6,14 +6,18 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 
 
-def correlation_plot(x, y, xlabel="", ylabel="", title="", wandb_label=""):
+def correlation_plot(x, y, xlabel="", ylabel="", title="", wandb_label="", distances=None):
     fig, ax = plt.subplots()
-    ax.scatter(x, y)
+    if distances is not None:
+        scatter = ax.scatter(x, y, c=distances, alpha=0.3, cmap='viridis')
+        plt.colorbar(scatter, label='Distance from Start State')
+    else:
+        ax.scatter(x, y, alpha=0.3)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     wandb.log({f"{wandb_label} (plots)/{title}": wandb.Image(fig)})
-
+    plt.close(fig)
 
 def analyze_reward_safety_correlation(q_values, safety_q_values, q_mean, safety_q_mean, 
                                      q_std, safety_q_std, mc_returns, safety_mc_returns, 
@@ -41,7 +45,7 @@ def analyze_reward_safety_correlation(q_values, safety_q_values, q_mean, safety_
     
     # Q-value correlations
     corrcoef_q = np.corrcoef(q_values, safety_q_values)[0, 1]
-    corrcoef_q1 = np.corrcoef(q1_values, safety_q1_values)[0, 1]
+    corrcoef_q1 = np.corrcoef(q1_values, safety_q1_values)[0, 1] 
     corrcoef_q2 = np.corrcoef(q2_values, safety_q2_values)[0, 1]
     corrcoef_cdq = np.corrcoef(cdq_values, safety_cdq_values)[0, 1]
     corrcoef_q_mean = np.corrcoef(q_mean, safety_q_mean)[0, 1]
@@ -132,6 +136,9 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
     cdq_array = np.zeros((num_episodes, max_steps), dtype=np.float32)
     q_std_array = np.zeros((num_episodes, max_steps), dtype=np.float32)
     mc_returns_array = np.zeros((num_episodes, max_steps), dtype=np.float32)
+    
+    distances_to_term_array = np.zeros((num_episodes, max_steps), dtype=np.float32)
+    distances_from_start_array = np.zeros((num_episodes, max_steps), dtype=np.float32)
     
     # Safety arrays if needed
     if safety_qf1 is not None and safety_qf2 is not None and (safety_mode == "safety" or safety_mode == "both"):
@@ -228,13 +235,26 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
             step += 1
 
         # Calculate Monte Carlo returns for reward
+        # Calculate Monte Carlo returns and distances
         mc_return = []
         return_ = 0
-        for r in reversed(episode_rewards):
+        distance_to_term = []  # Distance to termination state
+        distance_from_start = []  # Distance from start state
+        
+        # Calculate returns and distances going backwards
+        for i, r in enumerate(reversed(episode_rewards)):
             return_ = r + args.gamma * return_
             mc_return.insert(0, return_)
+            distance_to_term.insert(0, i)  # Steps until end
+        
+        # Calculate distance from start going forwards
+        for i in range(len(episode_rewards)):
+            distance_from_start.append(i)  # Steps since start
+            
         mc_returns.append(mc_return[0])  # First step return
         mc_returns_array[episode, :len(mc_return)] = np.array(mc_return)
+        distances_to_term_array[episode, :len(distance_to_term)] = np.array(distance_to_term) 
+        distances_from_start_array[episode, :len(distance_from_start)] = np.array(distance_from_start)
         
         # Calculate Monte Carlo returns for safety if needed
         if safety_qf1 is not None and safety_qf2 is not None and (safety_mode == "safety" or safety_mode == "both"):
@@ -293,17 +313,17 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
     
     # Analyze reward critic values
     if safety_mode == "reward" or safety_mode == "both":
-        analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cdq_values, "(s0)", global_step, writer, "Reward")
+        analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cdq_values, "(s0)", global_step, writer, "Reward", distances_to_term_array[:, 0])
         analyze_values(q_array.flatten(), q_mean_array.flatten(), q_std_array.flatten(), mc_returns_array.flatten(),
-                      q1_array.flatten(), q2_array.flatten(), cdq_array.flatten(), "", global_step, writer, "Reward")
+                      q1_array.flatten(), q2_array.flatten(), cdq_array.flatten(), "", global_step, writer, "Reward", distances_to_term_array.flatten())
     
     # Analyze safety critic values if needed
     if safety_qf1 is not None and safety_qf2 is not None and (safety_mode == "safety" or safety_mode == "both"):
         analyze_values(safety_q_values, safety_q_mean, safety_q_std, safety_mc_returns, safety_q1_values, safety_q2_values, 
-                      safety_cdq_values, "(s0)", global_step, writer, "Safety")
+                      safety_cdq_values, "(s0)", global_step, writer, "Safety", distances_to_term_array[:, 0])
         analyze_values(safety_q_array.flatten(), safety_q_mean_array.flatten(), safety_q_std_array.flatten(), 
                       safety_mc_returns_array.flatten(), safety_q1_array.flatten(), safety_q2_array.flatten(), 
-                      safety_cdq_array.flatten(), "", global_step, writer, "Safety")
+                      safety_cdq_array.flatten(), "", global_step, writer, "Safety", distances_to_term_array.flatten())
     
     # Analyze reward-safety correlations if both are being evaluated
     if safety_qf1 is not None and safety_qf2 is not None and safety_mode == "both":
@@ -324,12 +344,13 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
             "", global_step, writer
         )
 
-def analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cdq_values, state, global_step, writer, prefix=""):
+def analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cdq_values, state, global_step, writer, prefix="", distances=None):
     """
     Analyze the relationship between predicted values and Monte Carlo returns
     
     Args:
         prefix: String prefix for the tensorboard metrics ("Reward" or "Safety")
+        distances: Array of distances from start state for each data point
     """
     if prefix:
         prefix = prefix + "_"
@@ -371,16 +392,16 @@ def analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cd
     writer.add_scalar(f"{prefix}RelEstimationErrors {state}/Mean_CDQ_Relative_Error", np.mean(mean_cdq_rel_error), global_step)
     writer.add_scalar(f"{prefix}RelEstimationErrors {state}/Mean_Q_Mean_Relative_Error", np.mean(mean_q_mean_rel_error), global_step)
 
-    correlation_plot(q_std, mean_q_error, 'Q-Value Standard Deviation', 'Estimation Error', 'Q-Value Standard Deviation vs Estimation Error', f"{prefix}Correlation Plots {state}")
-    correlation_plot(q_std, mean_q1_error, 'Q-Value Standard Deviation', 'Q1 Estimation Error', 'Q-Value Standard Deviation vs Q1 Estimation Error', f"{prefix}Correlation Plots {state}")
-    correlation_plot(q_std, mean_q2_error, 'Q-Value Standard Deviation', 'Q2 Estimation Error', 'Q-Value Standard Deviation vs Q2 Estimation Error', f"{prefix}Correlation Plots {state}")
-    correlation_plot(q_std, mean_cdq_error, 'Q-Value Standard Deviation', 'CDQ Estimation Error', 'Q-Value Standard Deviation vs CDQ Estimation Error', f"{prefix}Correlation Plots {state}")
-    correlation_plot(q_std, mean_q_mean_error, 'Q-Value Standard Deviation', 'Mean Q Estimation Error', 'Q-Value Standard Deviation vs Mean Q Estimation Error', f"{prefix}Correlation Plots {state}")
-    correlation_plot(q_std, (np.array(q_values) - np.array(mc_returns)) / (np.array(mc_returns)+1), 'Q-Value Standard Deviation', 'Relative Estimation Error', 'Q-Value Standard Deviation vs Relative Estimation Error', f"{prefix}Relative Correlation Plot {state}")
-    correlation_plot(q_std, (np.array(q1_values) - np.array(mc_returns)) / (np.array(mc_returns)+1), 'Q-Value Standard Deviation', 'Q1 Relative Estimation Error', 'Q-Value Standard Deviation vs Q1 Relative Estimation Error', f"{prefix}Relative Correlation Plot {state}")
-    correlation_plot(q_std, (np.array(q2_values) - np.array(mc_returns)) / (np.array(mc_returns)+1), 'Q-Value Standard Deviation', 'Q2 Relative Estimation Error', 'Q-Value Standard Deviation vs Q2 Relative Estimation Error', f"{prefix}Relative Correlation Plot {state}")
-    correlation_plot(q_std, (np.array(cdq_values) - np.array(mc_returns)) / (np.array(mc_returns)+1), 'Q-Value Standard Deviation', 'CDQ Relative Estimation Error', 'Q-Value Standard Deviation vs CDQ Relative Estimation Error', f"{prefix}Relative Correlation Plot {state}")
-    correlation_plot(q_std, (np.array(q_mean) - np.array(mc_returns)) / (np.array(mc_returns)+1), 'Q-Value Standard Deviation', 'Mean Q Relative Estimation Error', 'Q-Value Standard Deviation vs Mean Q Relative Estimation Error', f"{prefix}Relative Correlation Plot {state}")
+    correlation_plot(q_std, mean_q_error, 'Q-Value Standard Deviation', 'Estimation Error', 'Q-Value Standard Deviation vs Estimation Error', f"{prefix}Correlation Plots {state}", distances)
+    correlation_plot(q_std, mean_q1_error, 'Q-Value Standard Deviation', 'Q1 Estimation Error', 'Q-Value Standard Deviation vs Q1 Estimation Error', f"{prefix}Correlation Plots {state}", distances)
+    correlation_plot(q_std, mean_q2_error, 'Q-Value Standard Deviation', 'Q2 Estimation Error', 'Q-Value Standard Deviation vs Q2 Estimation Error', f"{prefix}Correlation Plots {state}", distances)
+    correlation_plot(q_std, mean_cdq_error, 'Q-Value Standard Deviation', 'CDQ Estimation Error', 'Q-Value Standard Deviation vs CDQ Estimation Error', f"{prefix}Correlation Plots {state}", distances)
+    correlation_plot(q_std, mean_q_mean_error, 'Q-Value Standard Deviation', 'Mean Q Estimation Error', 'Q-Value Standard Deviation vs Mean Q Estimation Error', f"{prefix}Correlation Plots {state}", distances)
+    correlation_plot(q_std, (np.array(q_values) - np.array(mc_returns)) / (np.array(mc_returns)+1), 'Q-Value Standard Deviation', 'Relative Estimation Error', 'Q-Value Standard Deviation vs Relative Estimation Error', f"{prefix}Relative Correlation Plot {state}", distances)
+    correlation_plot(q_std, (np.array(q1_values) - np.array(mc_returns)) / (np.array(mc_returns)+1), 'Q-Value Standard Deviation', 'Q1 Relative Estimation Error', 'Q-Value Standard Deviation vs Q1 Relative Estimation Error', f"{prefix}Relative Correlation Plot {state}", distances)
+    correlation_plot(q_std, (np.array(q2_values) - np.array(mc_returns)) / (np.array(mc_returns)+1), 'Q-Value Standard Deviation', 'Q2 Relative Estimation Error', 'Q-Value Standard Deviation vs Q2 Relative Estimation Error', f"{prefix}Relative Correlation Plot {state}", distances)
+    correlation_plot(q_std, (np.array(cdq_values) - np.array(mc_returns)) / (np.array(mc_returns)+1), 'Q-Value Standard Deviation', 'CDQ Relative Estimation Error', 'Q-Value Standard Deviation vs CDQ Relative Estimation Error', f"{prefix}Relative Correlation Plot {state}", distances)
+    correlation_plot(q_std, (np.array(q_mean) - np.array(mc_returns)) / (np.array(mc_returns)+1), 'Q-Value Standard Deviation', 'Mean Q Relative Estimation Error', 'Q-Value Standard Deviation vs Mean Q Relative Estimation Error', f"{prefix}Relative Correlation Plot {state}", distances)
 
     corrcoef_q = np.corrcoef(q_std, mean_q_error)[0, 1]
     corrcoef_q1 = np.corrcoef(q_std, mean_q1_error)[0, 1]
