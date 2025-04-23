@@ -13,7 +13,7 @@ import torch.optim as optim
 import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
-
+from utils import *
 
 @dataclass
 class Args:
@@ -91,6 +91,10 @@ class Args:
     ## Overestimation / Underestimation
     value_evaluation_period: int = 100000
     """Evaluate Q-values every x steps  """
+    use_cdq: bool = True
+    """Whether to use CDQ or not"""
+    use_entropy_critic: bool = False
+    """Whether to use entropy critic or not"""
     
 
 
@@ -109,71 +113,71 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 
 
 
-def evaluate_value_estimates(env, actor, qf1, qf2, alpha, device, safety=False, num_episodes=10, max_steps=1000):
-    """
-    Evaluates Q-value overestimation by comparing Q-values to Monte Carlo returns.
+# def evaluate_value_estimates(env, actor, qf1, qf2, alpha, device, safety=False, num_episodes=10, max_steps=1000):
+#     """
+#     Evaluates Q-value overestimation by comparing Q-values to Monte Carlo returns.
     
-    Args:
-        env: The environment to evaluate in
-        actor: The policy network
-        qf1, qf2: The Q-networks
-        device: The device to run computations on
-        num_episodes: Number of episodes to average over
-        max_steps: Maximum steps per episode
+#     Args:
+#         env: The environment to evaluate in
+#         actor: The policy network
+#         qf1, qf2: The Q-networks
+#         device: The device to run computations on
+#         num_episodes: Number of episodes to average over
+#         max_steps: Maximum steps per episode
         
-    Returns:
-        mean_q_error: Average error between Q-values and MC returns
-        mean_q_values: Average predicted Q-values
-        mean_mc_values: Average Monte Carlo returns
-    """
-    q_values = []
-    mc_returns = []
+#     Returns:
+#         mean_q_error: Average error between Q-values and MC returns
+#         mean_q_values: Average predicted Q-values
+#         mean_mc_values: Average Monte Carlo returns
+#     """
+#     q_values = []
+#     mc_returns = []
     
-    for episode in range(num_episodes):
-        obs, _ = env.reset()
-        done = False
-        step = 0
-        episode_rewards = []
+#     for episode in range(num_episodes):
+#         obs, _ = env.reset()
+#         done = False
+#         step = 0
+#         episode_rewards = []
         
-        # Get initial action and Q-value
-        with torch.no_grad():
-            state = torch.FloatTensor(obs).to(device)
-            action, log_pi, _ = actor.get_action(state.unsqueeze(0))
-            q1 = qf1(state.unsqueeze(0), action) 
-            q2 = qf2(state.unsqueeze(0), action)
-            if not safety:
-                q_value = (torch.min(q1, q2) + alpha * log_pi).item()
-            else:
-                q_value = torch.max(q1, q2).item()
+#         # Get initial action and Q-value
+#         with torch.no_grad():
+#             state = torch.FloatTensor(obs).to(device)
+#             action, log_pi, _ = actor.get_action(state.unsqueeze(0))
+#             q1 = qf1(state.unsqueeze(0), action) 
+#             q2 = qf2(state.unsqueeze(0), action)
+#             if not safety:
+#                 q_value = (torch.min(q1, q2) + alpha * log_pi).item()
+#             else:
+#                 q_value = torch.max(q1, q2).item()
 
-        q_values.append(q_value)
+#         q_values.append(q_value)
         
-        # Run episode and collect rewards
-        while not done and step < max_steps:
-            action = action.squeeze().detach().cpu().numpy()
-            obs, reward, terminated, truncated, _ = env.step(action)
-            if safety:
-                reward = int(terminated)
-            done = terminated or truncated
-            episode_rewards.append(reward)
-            step += 1
+#         # Run episode and collect rewards
+#         while not done and step < max_steps:
+#             action = action.squeeze().detach().cpu().numpy()
+#             obs, reward, terminated, truncated, _ = env.step(action)
+#             if safety:
+#                 reward = int(terminated)
+#             done = terminated or truncated
+#             episode_rewards.append(reward)
+#             step += 1
             
-            if not done:
-                with torch.no_grad():
-                    state = torch.FloatTensor(obs).to(device)
-                    action, _, _ = actor.get_action(state.unsqueeze(0))
+#             if not done:
+#                 with torch.no_grad():
+#                     state = torch.FloatTensor(obs).to(device)
+#                     action, _, _ = actor.get_action(state.unsqueeze(0))
         
-        # Calculate Monte Carlo return
-        mc_return = 0
-        for r in reversed(episode_rewards):
-            mc_return = r + args.gamma * mc_return
-        mc_returns.append(mc_return)
+#         # Calculate Monte Carlo return
+#         mc_return = 0
+#         for r in reversed(episode_rewards):
+#             mc_return = r + args.gamma * mc_return
+#         mc_returns.append(mc_return)
     
-    mean_q_error = np.mean(np.array(q_values) - np.array(mc_returns))
-    mean_q_values = np.mean(q_values)
-    mean_mc_values = np.mean(mc_returns)
+#     mean_q_error = np.mean(np.array(q_values) - np.array(mc_returns))
+#     mean_q_values = np.mean(q_values)
+#     mean_mc_values = np.mean(mc_returns)
     
-    return mean_q_error, mean_q_values, mean_mc_values
+#     return mean_q_error, mean_q_values, mean_mc_values
 
 
 # ALGO LOGIC: initialize agent here:
@@ -424,21 +428,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         if global_step % args.value_evaluation_period == 0:
             # Evaluate reward Q-values
-            mean_q_error, mean_q_values, mean_mc_values = evaluate_value_estimates(
-                envs.envs[0], actor, qf1, qf2, alpha, device
-            )
-            writer.add_scalar("ValueEstimation/mean_q_error", mean_q_error, global_step)
-            writer.add_scalar("ValueEstimation/mean_q_values", mean_q_values, global_step)
-            writer.add_scalar("ValueEstimation/mean_mc_values", mean_mc_values, global_step)
-
-            # Evaluate safety Q-values
-            mean_safety_q_error, mean_safety_q_values, mean_safety_mc_values = evaluate_value_estimates(
-                envs.envs[0], actor, safety_qf1, safety_qf2, alpha, device, True 
-            )
-            writer.add_scalar("ValueEstimation/mean_safety_q_error", mean_safety_q_error, global_step)
-            writer.add_scalar("ValueEstimation/mean_safety_q_values", mean_safety_q_values, global_step)
-            writer.add_scalar("ValueEstimation/mean_safety_mc_values", mean_safety_mc_values, global_step)
-
+            evaluate_value_estimates(global_step, writer, args, envs.envs[0], actor, qf1, qf2, device, safety_qf1, safety_qf2, safety_mode="both", num_episodes=100, max_steps=1000)
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
         if args.use_resets and global_step % args.reset_interval == 0:
