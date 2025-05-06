@@ -100,6 +100,15 @@ class Args:
     independent_q_safety: str = "False"
     """Whether to train safety Q-networks independently"""
     
+    # Network architecture arguments
+    use_layer_norm_q: str = "False"
+    """Whether to use layer normalization in Q-networks"""
+    use_layer_norm_policy: str = "False"
+    """Whether to use layer normalization in policy network"""
+    use_spectral_norm_q: str = "False"
+    """Whether to use spectral normalization in Q-networks"""
+    use_spectral_norm_policy: str = "False"
+    """Whether to use spectral normalization in policy network"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -118,32 +127,58 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 
 # ALGO LOGIC: initialize agent here:
 class SoftQNetwork(nn.Module):
-    def __init__(self, env):
+    def __init__(self, env, use_layer_norm=False, use_spectral_norm=False):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, 1)
+        if use_spectral_norm:
+            self.fc1 = nn.utils.spectral_norm(nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256))
+            self.fc2 = nn.utils.spectral_norm(nn.Linear(256, 256))
+            self.fc3 = nn.utils.spectral_norm(nn.Linear(256, 1))
+        else:
+            self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
+            self.fc2 = nn.Linear(256, 256)
+            self.fc3 = nn.Linear(256, 1)
+        self.use_layer_norm = use_layer_norm
+        if use_layer_norm:
+            self.ln1 = nn.LayerNorm(256)
+            self.ln2 = nn.LayerNorm(256)
 
     def forward(self, x, a):
         x = torch.cat([x, a], 1)
         x = F.relu(self.fc1(x))
+        if self.use_layer_norm:
+            x = self.ln1(x)
         x = F.relu(self.fc2(x))
+        if self.use_layer_norm:
+            x = self.ln2(x)
         x = self.fc3(x)
         return x
 
 
 class SafetyQNetwork(nn.Module):
-    def __init__(self, env):
+    def __init__(self, env, use_layer_norm=False, use_spectral_norm=False):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, 1)  # Output is the expected cost
+        if use_spectral_norm:
+            self.fc1 = nn.utils.spectral_norm(nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256))
+            self.fc2 = nn.utils.spectral_norm(nn.Linear(256, 256))
+            self.fc3 = nn.utils.spectral_norm(nn.Linear(256, 1))
+        else:
+            self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
+            self.fc2 = nn.Linear(256, 256)
+            self.fc3 = nn.Linear(256, 1)
         self.sigmoid = nn.Sigmoid()
+        self.use_layer_norm = use_layer_norm
+        if use_layer_norm:
+            self.ln1 = nn.LayerNorm(256)
+            self.ln2 = nn.LayerNorm(256)
         
     def forward(self, x, a):
         x = torch.cat([x, a], 1)
         x = F.relu(self.fc1(x))
+        if self.use_layer_norm:
+            x = self.ln1(x)
         x = F.relu(self.fc2(x))
+        if self.use_layer_norm:
+            x = self.ln2(x)
         x = self.sigmoid(self.fc3(x))
         return x
 
@@ -191,12 +226,22 @@ class PIDLambdaController:
         return self.lambda_value
 
 class Actor(nn.Module):
-    def __init__(self, env):
+    def __init__(self, env, use_layer_norm=False, use_spectral_norm=False):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc_mean = nn.Linear(256, np.prod(env.single_action_space.shape))
-        self.fc_logstd = nn.Linear(256, np.prod(env.single_action_space.shape))
+        if use_spectral_norm:
+            self.fc1 = nn.utils.spectral_norm(nn.Linear(np.array(env.single_observation_space.shape).prod(), 256))
+            self.fc2 = nn.utils.spectral_norm(nn.Linear(256, 256))
+            self.fc_mean = nn.utils.spectral_norm(nn.Linear(256, np.prod(env.single_action_space.shape)))
+            self.fc_logstd = nn.utils.spectral_norm(nn.Linear(256, np.prod(env.single_action_space.shape)))
+        else:
+            self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
+            self.fc2 = nn.Linear(256, 256)
+            self.fc_mean = nn.Linear(256, np.prod(env.single_action_space.shape))
+            self.fc_logstd = nn.Linear(256, np.prod(env.single_action_space.shape))
+        self.use_layer_norm = use_layer_norm
+        if use_layer_norm:
+            self.ln1 = nn.LayerNorm(256)
+            self.ln2 = nn.LayerNorm(256)
         # action rescaling
         self.register_buffer(
             "action_scale", torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32)
@@ -207,7 +252,11 @@ class Actor(nn.Module):
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
+        if self.use_layer_norm:
+            x = self.ln1(x)
         x = F.relu(self.fc2(x))
+        if self.use_layer_norm:
+            x = self.ln2(x)
         mean = self.fc_mean(x)
         log_std = self.fc_logstd(x)
         log_std = torch.tanh(log_std)
@@ -262,6 +311,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     args.independent_q_reward = args.independent_q_reward == "True"
     args.independent_q_safety = args.independent_q_safety == "True"
+    args.use_layer_norm_q = args.use_layer_norm_q == "True"
+    args.use_layer_norm_policy = args.use_layer_norm_policy == "True"
+    args.use_spectral_norm_q = args.use_spectral_norm_q == "True"
+    args.use_spectral_norm_policy = args.use_spectral_norm_policy == "True"
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -277,21 +330,21 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     max_action = float(envs.single_action_space.high[0])
 
-    actor = Actor(envs).to(device)
-    qf1 = SoftQNetwork(envs).to(device)
-    qf2 = SoftQNetwork(envs).to(device)
-    qf1_target = SoftQNetwork(envs).to(device)
-    qf2_target = SoftQNetwork(envs).to(device)
+    actor = Actor(envs, args.use_layer_norm_policy, args.use_spectral_norm_policy).to(device)
+    qf1 = SoftQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+    qf2 = SoftQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+    qf1_target = SoftQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+    qf2_target = SoftQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
     qf1_target.load_state_dict(qf1.state_dict())
     qf2_target.load_state_dict(qf2.state_dict())
     q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
     actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr)
 
     # Safety components
-    safety_qf1 = SafetyQNetwork(envs).to(device)
-    safety_qf2 = SafetyQNetwork(envs).to(device)
-    safety_qf1_target = SafetyQNetwork(envs).to(device)
-    safety_qf2_target = SafetyQNetwork(envs).to(device)
+    safety_qf1 = SafetyQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+    safety_qf2 = SafetyQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+    safety_qf1_target = SafetyQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+    safety_qf2_target = SafetyQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
     safety_qf1_target.load_state_dict(safety_qf1.state_dict())
     safety_qf2_target.load_state_dict(safety_qf2.state_dict())
     safety_q_optimizer = optim.Adam(list(safety_qf1.parameters()) + list(safety_qf2.parameters()), lr=args.q_lr)
@@ -318,6 +371,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         envs.single_observation_space,
         envs.single_action_space,
         device,
+        # n_envs=5,
         handle_timeout_termination=False,
     )
     start_time = time.time()
@@ -371,19 +425,19 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
         if args.use_resets and global_step % args.reset_interval == 0:
-            actor = Actor(envs).to(device)
-            qf1 = SoftQNetwork(envs).to(device)
-            qf2 = SoftQNetwork(envs).to(device)
-            qf1_target = SoftQNetwork(envs).to(device)
-            qf2_target = SoftQNetwork(envs).to(device)
+            actor = Actor(envs, args.use_layer_norm_policy, args.use_spectral_norm_policy).to(device)
+            qf1 = SoftQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+            qf2 = SoftQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+            qf1_target = SoftQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+            qf2_target = SoftQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
             qf1_target.load_state_dict(qf1.state_dict())
             qf2_target.load_state_dict(qf2.state_dict())
             q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
             actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr)
-            safety_qf1 = SafetyQNetwork(envs).to(device)
-            safety_qf2 = SafetyQNetwork(envs).to(device)
-            safety_qf1_target = SafetyQNetwork(envs).to(device)
-            safety_qf2_target = SafetyQNetwork(envs).to(device)
+            safety_qf1 = SafetyQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+            safety_qf2 = SafetyQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+            safety_qf1_target = SafetyQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
+            safety_qf2_target = SafetyQNetwork(envs, args.use_layer_norm_q, args.use_spectral_norm_q).to(device)
             safety_qf1_target.load_state_dict(safety_qf1.state_dict())
             safety_qf2_target.load_state_dict(safety_qf2.state_dict())
             safety_q_optimizer = optim.Adam(list(safety_qf1.parameters()) + list(safety_qf2.parameters()), lr=args.q_lr)
@@ -454,7 +508,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                         # Safety component in actor loss
                         safety_qf1_pi = safety_qf1(data.observations, pi)
                         safety_qf2_pi = safety_qf2(data.observations, pi)
-                        min_safety_qf_pi = torch.max(safety_qf1_pi, safety_qf2_pi)
+                        if args.independent_q_safety:
+                            min_safety_qf_pi = safety_qf1_pi
+                        else:
+                            min_safety_qf_pi = torch.max(safety_qf1_pi, safety_qf2_pi)
 
                         actor_loss += lambda_value * min_safety_qf_pi.mean()  # Lagrangian term
 

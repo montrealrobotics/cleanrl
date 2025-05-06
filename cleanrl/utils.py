@@ -22,7 +22,8 @@ def correlation_plot(x, y, xlabel="", ylabel="", title="", wandb_label="", dista
 def analyze_reward_safety_correlation(q_values, safety_q_values, q_mean, safety_q_mean, 
                                      q_std, safety_q_std, mc_returns, safety_mc_returns, 
                                      q1_values, safety_q1_values, q2_values, safety_q2_values, 
-                                     cdq_values, safety_cdq_values, state, global_step, writer):
+                                     cdq_values, safety_cdq_values, state, global_step, writer,
+                                     distances_to_failure=None):
     """
     Analyze correlations between reward and safety value estimates
     
@@ -37,6 +38,7 @@ def analyze_reward_safety_correlation(q_values, safety_q_values, q_mean, safety_
         state: String indicating state (e.g., "(s0)")
         global_step: Current training step
         writer: TensorBoard writer
+        distances_to_failure: Array of distances to failure for each state (optional)
     """
     # Compute correlations between reward and safety values
     if len(q_values) != len(safety_q_values):
@@ -77,18 +79,18 @@ def analyze_reward_safety_correlation(q_values, safety_q_values, q_mean, safety_
     corrcoef_error = np.corrcoef(reward_error, safety_error)[0, 1]
     writer.add_scalar(f"Reward_Safety_Correlation {state}/Estimation_Errors", corrcoef_error, global_step)
     
-    # Generate correlation plots
+    # Generate correlation plots with distance to failure information
     correlation_plot(q_values, safety_q_values, 'Reward Q-Values', 'Safety Q-Values', 
-                    'Reward vs Safety Q-Values', f"Reward_Safety_Correlation {state}")
+                    'Reward vs Safety Q-Values', f"Reward_Safety_Correlation {state}", distances_to_failure)
     correlation_plot(safety_mc_returns, q_values, 'Reward MC Returns', 'Reward Q-Values', 
-                    'Safety MC Returns vs Reward Q-Values', f"Reward_Safety_Correlation {state}") 
+                    'Safety MC Returns vs Reward Q-Values', f"Reward_Safety_Correlation {state}", distances_to_failure) 
     correlation_plot(q_std, safety_q_std, 'Reward Q-Value Std', 'Safety Q-Value Std', 
-                    'Reward vs Safety Q-Value Standard Deviation', f"Reward_Safety_Correlation {state}")
+                    'Reward vs Safety Q-Value Standard Deviation', f"Reward_Safety_Correlation {state}", distances_to_failure)
     
     correlation_plot(mc_returns, safety_mc_returns, 'Reward MC Returns', 'Safety MC Returns', 
-                    'Reward vs Safety MC Returns', f"Reward_Safety_Correlation {state}")
+                    'Reward vs Safety MC Returns', f"Reward_Safety_Correlation {state}", distances_to_failure)
     correlation_plot(reward_error, safety_error, 'Reward Estimation Error', 'Safety Estimation Error', 
-                    'Reward vs Safety Estimation Error', f"Reward_Safety_Correlation {state}")
+                    'Reward vs Safety Estimation Error', f"Reward_Safety_Correlation {state}", distances_to_failure)
     
     # Calculate trade-off metrics - how often reward and safety disagree
     reward_positive = np.array(q_values) > 0
@@ -101,6 +103,14 @@ def analyze_reward_safety_correlation(q_values, safety_q_values, q_mean, safety_
     safety_rel_error = (np.array(safety_q_values) - np.array(safety_mc_returns)) / (np.array(safety_mc_returns) + 1)
     corrcoef_rel_error = np.corrcoef(reward_rel_error, safety_rel_error)[0, 1]
     writer.add_scalar(f"Reward_Safety_Correlation {state}/Relative_Estimation_Errors", corrcoef_rel_error, global_step)
+
+    # Correlation between std of safety and reward
+    corrcoef_std = np.corrcoef(q_std, safety_q_std)[0, 1]
+    writer.add_scalar(f"Reward_Safety_Correlation {state}/Std_Correlation", corrcoef_std, global_step)
+    
+    # Scatter plot of std values with distance to failure information
+    correlation_plot(q_std, safety_q_std, 'Reward Q-Value Std', 'Safety Q-Value Std', 
+                    'Reward vs Safety Q-Value Standard Deviation Scatter', f"Reward_Safety_Correlation {state}", distances_to_failure)
 
 
 def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, device, safety_qf1=None, safety_qf2=None, safety_mode="both", num_episodes=100, max_steps=1000):
@@ -414,3 +424,46 @@ def analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cd
     writer.add_scalar(f"{prefix}Correlation {state}/Q_Std_vs_Q2-Estimation_Error", corrcoef_q2, global_step)
     writer.add_scalar(f"{prefix}Correlation {state}/Q_Std_vs_CDQ-Estimation_Error", corrcoef_cdq, global_step)
     writer.add_scalar(f"{prefix}Correlation {state}/Q_Std_vs_Q_mean_Estimation_Error", corrcoef_q_mean, global_step)
+
+
+    correlation_plot(mc_returns, q_values, 'MC Returns', 'Q-Values', 'MC Returns vs Q-Values', f"{prefix}MC vs Q Plots {state}", distances)
+    correlation_plot(mc_returns, q1_values, 'MC Returns', 'Q1-Values', 'MC Returns vs Q1-Values', f"{prefix}MC vs Q Plots {state}", distances)
+    correlation_plot(mc_returns, q2_values, 'MC Returns', 'Q2-Values', 'MC Returns vs Q2-Values', f"{prefix}MC vs Q Plots {state}", distances)
+    correlation_plot(mc_returns, cdq_values, 'MC Returns', 'CDQ-Values', 'MC Returns vs CDQ-Values', f"{prefix}MC vs Q Plots {state}", distances)
+    correlation_plot(mc_returns, q_mean, 'MC Returns', 'Mean Q-Values', 'MC Returns vs Mean Q-Values', f"{prefix}MC vs Q Plots {state}", distances)
+
+    corrcoef_q = np.corrcoef(mc_returns, q_values)[0, 1]
+    corrcoef_q1 = np.corrcoef(mc_returns, q1_values)[0, 1]
+    corrcoef_q2 = np.corrcoef(mc_returns, q2_values)[0, 1]
+    corrcoef_cdq = np.corrcoef(mc_returns, cdq_values)[0, 1]
+    corrcoef_q_mean = np.corrcoef(mc_returns, q_mean)[0, 1]
+
+    writer.add_scalar(f"{prefix}Correlation {state}/MC_vs_Q-Values", corrcoef_q, global_step)
+    writer.add_scalar(f"{prefix}Correlation {state}/MC_vs_Q1-Values", corrcoef_q1, global_step)
+    writer.add_scalar(f"{prefix}Correlation {state}/MC_vs_Q2-Values", corrcoef_q2, global_step)
+    writer.add_scalar(f"{prefix}Correlation {state}/MC_vs_CDQ-Values", corrcoef_cdq, global_step)
+    writer.add_scalar(f"{prefix}Correlation {state}/MC_vs_Mean_Q-Values", corrcoef_q_mean, global_step)
+
+
+    # Also log the mean and max q_std values
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Mean_Q_Std", np.mean(q_std), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Max_Q_Std", np.max(q_std), global_step)
+    # Log different quantiles of Q-value standard deviation
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_25th_Percentile", np.percentile(q_std, 25), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_50th_Percentile", np.percentile(q_std, 50), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_75th_Percentile", np.percentile(q_std, 75), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_90th_Percentile", np.percentile(q_std, 90), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_95th_Percentile", np.percentile(q_std, 95), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_99th_Percentile", np.percentile(q_std, 99), global_step)
+
+    # Log relative Q-value standard deviation statistics
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Mean_Q_Std_Relative", np.mean(q_std / (np.abs(q_values) + 1)), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Max_Q_Std_Relative", np.max(q_std / (np.abs(q_values) + 1)), global_step)
+    # Log different quantiles of relative Q-value standard deviation
+    relative_q_std = q_std / (np.abs(q_values) + 1)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_25th_Percentile_Relative", np.percentile(relative_q_std, 25), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_50th_Percentile_Relative", np.percentile(relative_q_std, 50), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_75th_Percentile_Relative", np.percentile(relative_q_std, 75), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_90th_Percentile_Relative", np.percentile(relative_q_std, 90), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_95th_Percentile_Relative", np.percentile(relative_q_std, 95), global_step)
+    writer.add_scalar(f"{prefix}Q_Std_Stats {state}/Q_Std_99th_Percentile_Relative", np.percentile(relative_q_std, 99), global_step)
