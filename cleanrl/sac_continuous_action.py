@@ -83,6 +83,8 @@ class Args:
     """Whether to use clipped double Q-learning"""
     beta: float = 0.0
     "Level of pessimism or optimism"
+    use_layer_norm: str = "False"
+    """Whether to use layer normalization in the critic network"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name, eval=False):
@@ -134,11 +136,22 @@ class SoftQNetwork(nn.Module):
         self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 1)
+        
+        # Add layer normalization if enabled
+        if args.use_layer_norm:
+            self.ln1 = nn.LayerNorm(256)
+            self.ln2 = nn.LayerNorm(256)
+        
         self.layer_init_states = {
             'fc1': self.fc1.state_dict(),
             'fc2': self.fc2.state_dict(),
             'fc3': self.fc3.state_dict()
         }
+        if args.use_layer_norm:
+            self.layer_init_states.update({
+                'ln1': self.ln1.state_dict(),
+                'ln2': self.ln2.state_dict()
+            })
 
     def reset_layers(self, layer_names):
         """Reset specified layers to their initial states"""
@@ -148,8 +161,16 @@ class SoftQNetwork(nn.Module):
 
     def forward(self, x, a):
         x = torch.cat([x, a], 1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
+        x = self.fc1(x)
+        if args.use_layer_norm:
+            x = self.ln1(x)
+        x = F.relu(x)
+        
+        x = self.fc2(x)
+        if args.use_layer_norm:
+            x = self.ln2(x)
+        x = F.relu(x)
+        
         x = self.fc3(x)
         return x
 
@@ -247,7 +268,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     args.use_resets = True if args.use_resets == "True" else False
     args.autotune = True if args.autotune == "True" else False
-
+    args.use_layer_norm = True if args.use_layer_norm == "True" else False
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
