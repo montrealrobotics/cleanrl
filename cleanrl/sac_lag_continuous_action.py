@@ -14,7 +14,7 @@ import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 from utils import *
-
+import safety_gymnasium
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
@@ -91,7 +91,7 @@ class Args:
     ## Overestimation / Underestimation
     value_evaluation_period: int = 100000
     """Evaluate Q-values every x steps  """
-    use_cdq: bool = True
+    use_cdq: str = "True"
     """Whether to use CDQ or not"""
     use_entropy_critic: bool = False
     """Whether to use entropy critic or not"""
@@ -117,7 +117,10 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
+            if "Safety" in env_id:
+                env = gym.make(env_id, early_termination=True, term_cost = 1)
+            else:
+                env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
         return env
@@ -315,7 +318,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     args.use_layer_norm_policy = args.use_layer_norm_policy == "True"
     args.use_spectral_norm_q = args.use_spectral_norm_q == "True"
     args.use_spectral_norm_policy = args.use_spectral_norm_policy == "True"
-
+    args.use_cdq = args.use_cdq == "True"
+    
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -396,7 +400,6 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         rewards = np.where(terminations, args.failure_penalty, rewards)
 
         total_failures += np.sum(terminations)
-        
         # TRY NOT TO MODIFY: record rewards for plotting purposes'
         if "final_info" in infos:
             for info in infos["final_info"]:
@@ -462,7 +465,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
                 qf1_a_values = qf1(data.observations, data.actions).view(-1)
                 qf2_a_values = qf2(data.observations, data.actions).view(-1)
-                if args.independent_q_reward:
+                if not args.use_cdq:
                     next_q1_values = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * qf1_next_target.view(-1)
                     next_q2_values = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * qf2_next_target.view(-1)
                     qf1_loss = F.mse_loss(qf1_a_values, next_q1_values)
@@ -476,7 +479,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 safety_qf1_a_values = safety_qf1(data.observations, data.actions).view(-1)
                 safety_qf2_a_values = safety_qf2(data.observations, data.actions).view(-1)
 
-                if args.independent_q_safety:
+                if not args.use_cdq:
                     next_cost1_value = data.dones.flatten() + (1 - data.dones.flatten()) * args.gamma * safety_qf1_next_target.view(-1)
                     next_cost2_value = data.dones.flatten() + (1 - data.dones.flatten()) * args.gamma * safety_qf2_next_target.view(-1)
                     safety_qf1_loss = F.mse_loss(safety_qf1_a_values, next_cost1_value)

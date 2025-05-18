@@ -17,7 +17,7 @@ def correlation_plot(x, y, xlabel="", ylabel="", title="", wandb_label="", dista
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     wandb.log({f"{wandb_label} (plots)/{title}": wandb.Image(fig)})
-    plt.close(fig)
+    # plt.close(fig)
 
 def analyze_reward_safety_correlation(q_values, safety_q_values, q_mean, safety_q_mean, 
                                      q_std, safety_q_std, mc_returns, safety_mc_returns, 
@@ -130,6 +130,7 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
     # Initialize arrays for reward critic
     q1_values, q2_values, cdq_values, q_values, q_std, q_mean = [], [], [], [], [], []
     mc_returns = []
+    policy_entropies = []  # New array for policy entropies
 
     # Initialize arrays for safety critic if provided
     if safety_qf1 is not None and safety_qf2 is not None and (safety_mode == "safety" or safety_mode == "both"):
@@ -146,6 +147,7 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
     cdq_array = np.zeros((num_episodes, max_steps), dtype=np.float32)
     q_std_array = np.zeros((num_episodes, max_steps), dtype=np.float32)
     mc_returns_array = np.zeros((num_episodes, max_steps), dtype=np.float32)
+    policy_entropy_array = np.zeros((num_episodes, max_steps), dtype=np.float32)  # New array for policy entropies
     
     distances_to_term_array = np.zeros((num_episodes, max_steps), dtype=np.float32)
     distances_from_start_array = np.zeros((num_episodes, max_steps), dtype=np.float32)
@@ -171,7 +173,7 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
         while not done and step < max_steps:
             with torch.no_grad():
                 state = torch.FloatTensor(obs).to(device)
-                action, _, _ = actor.get_action(state.unsqueeze(0))
+                action, log_prob, entropy = actor.get_action(state.unsqueeze(0))  # Get entropy from policy
                 
                 # Get reward Q-values
                 q1 = qf1(state.unsqueeze(0), action)
@@ -189,6 +191,7 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
                 cdq_values.append(torch.min(q1, q2).item())
                 q_std.append(torch.abs(q1-q2).item())
                 q_mean.append(((q1+q2)/2).item())
+                policy_entropies.append(log_prob.mean().item())  # Take mean of entropy if it's a multi-element tensor
 
                 if args.use_cdq == "True":
                     q_value = torch.min(q1, q2).item()
@@ -223,6 +226,7 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
             q_array[episode, step] = q_value if step == 0 else 0  # Only for first step
             q_std_array[episode, step] = torch.abs(q1 - q2).item() / 2
             q_mean_array[episode, step] = ((q1 + q2)/2).item()
+            policy_entropy_array[episode, step] = log_prob.mean().item()  # Take mean of entropy if it's a multi-element tensor
             
             # Record all step values for safety critic if needed
             if safety_qf1 is not None and safety_qf2 is not None and (safety_mode == "safety" or safety_mode == "both"):
@@ -286,6 +290,7 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
         'q_values_s0': q_values,
         'q_std_s0': q_std,
         'q_mean_s0': q_mean,
+        'policy_entropies_s0': policy_entropies,  # Add policy entropies to saved data
 
         "q1_array": q1_array,
         "q2_array": q2_array,
@@ -294,6 +299,7 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
         "cdq_array": cdq_array,
         "q_std_array": q_std_array,
         "q_mean_array": q_mean_array,
+        "policy_entropy_array": policy_entropy_array,  # Add policy entropy array to saved data
     }
     
     # Add safety values to dictionary if needed
@@ -323,17 +329,17 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
     
     # Analyze reward critic values
     if safety_mode == "reward" or safety_mode == "both":
-        analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cdq_values, "(s0)", global_step, writer, "Reward", distances_to_term_array[:, 0])
+        analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cdq_values, "(s0)", global_step, writer, "Reward", distances_to_term_array[:, 0], policy_entropies)
         analyze_values(q_array.flatten(), q_mean_array.flatten(), q_std_array.flatten(), mc_returns_array.flatten(),
-                      q1_array.flatten(), q2_array.flatten(), cdq_array.flatten(), "", global_step, writer, "Reward", distances_to_term_array.flatten())
+                      q1_array.flatten(), q2_array.flatten(), cdq_array.flatten(), "", global_step, writer, "Reward", distances_to_term_array.flatten(), policy_entropy_array.flatten())
     
     # Analyze safety critic values if needed
     if safety_qf1 is not None and safety_qf2 is not None and (safety_mode == "safety" or safety_mode == "both"):
         analyze_values(safety_q_values, safety_q_mean, safety_q_std, safety_mc_returns, safety_q1_values, safety_q2_values, 
-                      safety_cdq_values, "(s0)", global_step, writer, "Safety", distances_to_term_array[:, 0])
+                      safety_cdq_values, "(s0)", global_step, writer, "Safety", distances_to_term_array[:, 0], policy_entropies)
         analyze_values(safety_q_array.flatten(), safety_q_mean_array.flatten(), safety_q_std_array.flatten(), 
                       safety_mc_returns_array.flatten(), safety_q1_array.flatten(), safety_q2_array.flatten(), 
-                      safety_cdq_array.flatten(), "", global_step, writer, "Safety", distances_to_term_array.flatten())
+                      safety_cdq_array.flatten(), "", global_step, writer, "Safety", distances_to_term_array.flatten(), policy_entropy_array.flatten())
     
     # Analyze reward-safety correlations if both are being evaluated
     if safety_qf1 is not None and safety_qf2 is not None and safety_mode == "both":
@@ -354,13 +360,14 @@ def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, de
             "", global_step, writer
         )
 
-def analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cdq_values, state, global_step, writer, prefix="", distances=None):
+def analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cdq_values, state, global_step, writer, prefix="", distances=None, policy_entropies=None):
     """
     Analyze the relationship between predicted values and Monte Carlo returns
     
     Args:
         prefix: String prefix for the tensorboard metrics ("Reward" or "Safety")
         distances: Array of distances from start state for each data point
+        policy_entropies: Array of policy entropies for each state
     """
     if prefix:
         prefix = prefix + "_"
@@ -401,6 +408,34 @@ def analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cd
     writer.add_scalar(f"{prefix}RelEstimationErrors {state}/Mean_Q2_Relative_Error", np.mean(mean_q2_rel_error), global_step)
     writer.add_scalar(f"{prefix}RelEstimationErrors {state}/Mean_CDQ_Relative_Error", np.mean(mean_cdq_rel_error), global_step)
     writer.add_scalar(f"{prefix}RelEstimationErrors {state}/Mean_Q_Mean_Relative_Error", np.mean(mean_q_mean_rel_error), global_step)
+
+    # Add policy entropy correlation analysis if entropies are provided
+    if policy_entropies is not None:
+        # Correlation plots between policy entropy and value estimates
+        correlation_plot(policy_entropies, q_values, 'Policy Entropy', 'Q-Values', 'Policy Entropy vs Q-Values', f"{prefix}Entropy Correlation {state}", distances)
+        correlation_plot(policy_entropies, q1_values, 'Policy Entropy', 'Q1-Values', 'Policy Entropy vs Q1-Values', f"{prefix}Entropy Correlation {state}", distances)
+        correlation_plot(policy_entropies, q2_values, 'Policy Entropy', 'Q2-Values', 'Policy Entropy vs Q2-Values', f"{prefix}Entropy Correlation {state}", distances)
+        correlation_plot(policy_entropies, cdq_values, 'Policy Entropy', 'CDQ-Values', 'Policy Entropy vs CDQ-Values', f"{prefix}Entropy Correlation {state}", distances)
+        correlation_plot(policy_entropies, mc_returns, 'Policy Entropy', 'MC Returns', 'Policy Entropy vs MC Returns', f"{prefix}Entropy Correlation {state}", distances)
+        
+        # Calculate and log correlation coefficients
+        corrcoef_q = np.corrcoef(policy_entropies, q_values)[0, 1]
+        corrcoef_q1 = np.corrcoef(policy_entropies, q1_values)[0, 1]
+        corrcoef_q2 = np.corrcoef(policy_entropies, q2_values)[0, 1]
+        corrcoef_cdq = np.corrcoef(policy_entropies, cdq_values)[0, 1]
+        corrcoef_mc = np.corrcoef(policy_entropies, mc_returns)[0, 1]
+        
+        writer.add_scalar(f"{prefix}EntropyCorrelation {state}/Entropy_vs_Q-Values", corrcoef_q, global_step)
+        writer.add_scalar(f"{prefix}EntropyCorrelation {state}/Entropy_vs_Q1-Values", corrcoef_q1, global_step)
+        writer.add_scalar(f"{prefix}EntropyCorrelation {state}/Entropy_vs_Q2-Values", corrcoef_q2, global_step)
+        writer.add_scalar(f"{prefix}EntropyCorrelation {state}/Entropy_vs_CDQ-Values", corrcoef_cdq, global_step)
+        writer.add_scalar(f"{prefix}EntropyCorrelation {state}/Entropy_vs_MC-Values", corrcoef_mc, global_step)
+        
+        # Log mean and std of policy entropy
+        writer.add_scalar(f"{prefix}EntropyStats {state}/Mean_Entropy", np.mean(policy_entropies), global_step)
+        writer.add_scalar(f"{prefix}EntropyStats {state}/Std_Entropy", np.std(policy_entropies), global_step)
+        writer.add_scalar(f"{prefix}EntropyStats {state}/Max_Entropy", np.max(policy_entropies), global_step)
+        writer.add_scalar(f"{prefix}EntropyStats {state}/Min_Entropy", np.min(policy_entropies), global_step)
 
     correlation_plot(q_std, mean_q_error, 'Q-Value Standard Deviation', 'Estimation Error', 'Q-Value Standard Deviation vs Estimation Error', f"{prefix}Correlation Plots {state}", distances)
     correlation_plot(q_std, mean_q1_error, 'Q-Value Standard Deviation', 'Q1 Estimation Error', 'Q-Value Standard Deviation vs Q1 Estimation Error', f"{prefix}Correlation Plots {state}", distances)
