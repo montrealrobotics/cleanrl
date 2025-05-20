@@ -7,7 +7,17 @@ import matplotlib.pyplot as plt
 
 
 def correlation_plot(x, y, xlabel="", ylabel="", title="", wandb_label="", distances=None):
-    fig, ax = plt.subplots()
+    """
+    Create and save correlation plots, supporting both online and offline wandb logging.
+    
+    Args:
+        x, y: Data for x and y axes
+        xlabel, ylabel: Axis labels
+        title: Plot title
+        wandb_label: Label for wandb logging
+        distances: Optional array for coloring points based on distance
+    """
+    fig, ax = plt.subplots(figsize=(10, 8))
     if distances is not None:
         scatter = ax.scatter(x, y, c=distances, alpha=0.3, cmap='viridis')
         plt.colorbar(scatter, label='Distance from Start State')
@@ -16,8 +26,20 @@ def correlation_plot(x, y, xlabel="", ylabel="", title="", wandb_label="", dista
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
+    
+    # Save plot locally first
+    plot_dir = "wandb_plots"
+    os.makedirs(plot_dir, exist_ok=True)
+    plot_path = os.path.join(plot_dir, f"{wandb_label}_{title.replace(' ', '_')}.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    
+    # Log to wandb
     wandb.log({f"{wandb_label} (plots)/{title}": wandb.Image(fig)})
-    # plt.close(fig)
+    
+    # Close the figure to free memory
+    plt.close(fig)
+    
+    return plot_path  # Return path for potential manual syncing
 
 def analyze_reward_safety_correlation(q_values, safety_q_values, q_mean, safety_q_mean, 
                                      q_std, safety_q_std, mc_returns, safety_mc_returns, 
@@ -25,7 +47,7 @@ def analyze_reward_safety_correlation(q_values, safety_q_values, q_mean, safety_
                                      cdq_values, safety_cdq_values, state, global_step, writer,
                                      distances_to_failure=None):
     """
-    Analyze correlations between reward and safety value estimates
+    Analyze correlations between reward and safety value estimates with improved offline logging support.
     
     Args:
         q_values, safety_q_values: Q-values for reward and safety
@@ -40,78 +62,64 @@ def analyze_reward_safety_correlation(q_values, safety_q_values, q_mean, safety_
         writer: TensorBoard writer
         distances_to_failure: Array of distances to failure for each state (optional)
     """
+    # Create a dictionary to store all metrics
+    metrics = {}
+    
     # Compute correlations between reward and safety values
     if len(q_values) != len(safety_q_values):
         print(f"Warning: Length mismatch between reward ({len(q_values)}) and safety ({len(safety_q_values)}) arrays")
         return
     
     # Q-value correlations
-    corrcoef_q = np.corrcoef(q_values, safety_q_values)[0, 1]
-    corrcoef_q1 = np.corrcoef(q1_values, safety_q1_values)[0, 1] 
-    corrcoef_q2 = np.corrcoef(q2_values, safety_q2_values)[0, 1]
-    corrcoef_cdq = np.corrcoef(cdq_values, safety_cdq_values)[0, 1]
-    corrcoef_q_mean = np.corrcoef(q_mean, safety_q_mean)[0, 1]
-    corrcoef_q_std = np.corrcoef(q_std, safety_q_std)[0, 1]
+    metrics[f"Reward_Safety_Correlation {state}/Q_Values"] = np.corrcoef(q_values, safety_q_values)[0, 1]
+    metrics[f"Reward_Safety_Correlation {state}/Q1_Values"] = np.corrcoef(q1_values, safety_q1_values)[0, 1]
+    metrics[f"Reward_Safety_Correlation {state}/Q2_Values"] = np.corrcoef(q2_values, safety_q2_values)[0, 1]
+    metrics[f"Reward_Safety_Correlation {state}/CDQ_Values"] = np.corrcoef(cdq_values, safety_cdq_values)[0, 1]
+    metrics[f"Reward_Safety_Correlation {state}/Q_Mean_Values"] = np.corrcoef(q_mean, safety_q_mean)[0, 1]
+    metrics[f"Reward_Safety_Correlation {state}/Q_Std_Values"] = np.corrcoef(q_std, safety_q_std)[0, 1]
     
-    # Write correlations to tensorboard
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/Q_Values", corrcoef_q, global_step)
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/Q1_Values", corrcoef_q1, global_step)
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/Q2_Values", corrcoef_q2, global_step)
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/CDQ_Values", corrcoef_cdq, global_step)
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/Q_Mean_Values", corrcoef_q_mean, global_step)
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/Q_Std_Values", corrcoef_q_std, global_step)
+    # MC returns correlations
+    metrics[f"Reward_Safety_Correlation {state}/MC_Returns"] = np.corrcoef(mc_returns, safety_mc_returns)[0, 1]
+    metrics[f"Reward_Safety_Correlation {state}/MC_Returns vs Q-values"] = np.corrcoef(safety_mc_returns, q_values)[0, 1]
+    metrics[f"Reward_Safety_Correlation {state}/safetyQ_vs_rewardQ"] = np.corrcoef(safety_q_values, q_values)[0, 1]
     
-    # Compute correlation between MC returns
-    corrcoef_mc = np.corrcoef(mc_returns, safety_mc_returns)[0, 1]
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/MC_Returns", corrcoef_mc, global_step)
-    
-    # Compute correlation between MC returns
-    corrcoef_mc_q = np.corrcoef(safety_mc_returns, q_values)[0, 1]
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/MC_Returns vs Q-values", corrcoef_mc_q, global_step)
-
-    # Compute correlation between MC returns
-    corrcoef_q = np.corrcoef(safety_q_values, q_values)[0, 1]
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/safetyQ_vs_rewardQ", corrcoef_q, global_step)
-
-    # Correlation between estimation errors
+    # Estimation errors
     reward_error = np.array(q_values) - np.array(mc_returns)
     safety_error = np.array(safety_q_values) - np.array(safety_mc_returns)
-    corrcoef_error = np.corrcoef(reward_error, safety_error)[0, 1]
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/Estimation_Errors", corrcoef_error, global_step)
+    metrics[f"Reward_Safety_Correlation {state}/Estimation_Errors"] = np.corrcoef(reward_error, safety_error)[0, 1]
     
-    # Generate correlation plots with distance to failure information
-    correlation_plot(q_values, safety_q_values, 'Reward Q-Values', 'Safety Q-Values', 
-                    'Reward vs Safety Q-Values', f"Reward_Safety_Correlation {state}", distances_to_failure)
-    correlation_plot(safety_mc_returns, q_values, 'Reward MC Returns', 'Reward Q-Values', 
-                    'Safety MC Returns vs Reward Q-Values', f"Reward_Safety_Correlation {state}", distances_to_failure) 
-    correlation_plot(q_std, safety_q_std, 'Reward Q-Value Std', 'Safety Q-Value Std', 
-                    'Reward vs Safety Q-Value Standard Deviation', f"Reward_Safety_Correlation {state}", distances_to_failure)
-    
-    correlation_plot(mc_returns, safety_mc_returns, 'Reward MC Returns', 'Safety MC Returns', 
-                    'Reward vs Safety MC Returns', f"Reward_Safety_Correlation {state}", distances_to_failure)
-    correlation_plot(reward_error, safety_error, 'Reward Estimation Error', 'Safety Estimation Error', 
-                    'Reward vs Safety Estimation Error', f"Reward_Safety_Correlation {state}", distances_to_failure)
-    
-    # Calculate trade-off metrics - how often reward and safety disagree
-    reward_positive = np.array(q_values) > 0
-    safety_risk = np.array(safety_q_values) > 0.5  # Assuming safety is probability of failure
-    disagreement_rate = np.mean(np.logical_xor(reward_positive, safety_risk))
-    writer.add_scalar(f"Reward_Safety_Tradeoff {state}/Disagreement_Rate", disagreement_rate, global_step)
-    
-    # Correlation between relative errors
+    # Relative errors
     reward_rel_error = (np.array(q_values) - np.array(mc_returns)) / (np.array(mc_returns) + 1)
     safety_rel_error = (np.array(safety_q_values) - np.array(safety_mc_returns)) / (np.array(safety_mc_returns) + 1)
-    corrcoef_rel_error = np.corrcoef(reward_rel_error, safety_rel_error)[0, 1]
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/Relative_Estimation_Errors", corrcoef_rel_error, global_step)
-
-    # Correlation between std of safety and reward
-    corrcoef_std = np.corrcoef(q_std, safety_q_std)[0, 1]
-    writer.add_scalar(f"Reward_Safety_Correlation {state}/Std_Correlation", corrcoef_std, global_step)
+    metrics[f"Reward_Safety_Correlation {state}/Relative_Estimation_Errors"] = np.corrcoef(reward_rel_error, safety_rel_error)[0, 1]
     
-    # Scatter plot of std values with distance to failure information
-    correlation_plot(q_std, safety_q_std, 'Reward Q-Value Std', 'Safety Q-Value Std', 
-                    'Reward vs Safety Q-Value Standard Deviation Scatter', f"Reward_Safety_Correlation {state}", distances_to_failure)
-
+    # Std correlation
+    metrics[f"Reward_Safety_Correlation {state}/Std_Correlation"] = np.corrcoef(q_std, safety_q_std)[0, 1]
+    
+    # Trade-off metrics
+    reward_positive = np.array(q_values) > 0
+    safety_risk = np.array(safety_q_values) > 0.5
+    metrics[f"Reward_Safety_Tradeoff {state}/Disagreement_Rate"] = np.mean(np.logical_xor(reward_positive, safety_risk))
+    
+    # Log all metrics to both tensorboard and wandb
+    for key, value in metrics.items():
+        writer.add_scalar(key, value, global_step)
+        wandb.log({key: value}, step=global_step)
+    
+    # Generate and save correlation plots
+    plot_paths = []
+    plot_paths.append(correlation_plot(q_values, safety_q_values, 'Reward Q-Values', 'Safety Q-Values', 
+                    'Reward vs Safety Q-Values', f"Reward_Safety_Correlation {state}", distances_to_failure))
+    plot_paths.append(correlation_plot(safety_mc_returns, q_values, 'Reward MC Returns', 'Reward Q-Values', 
+                    'Safety MC Returns vs Reward Q-Values', f"Reward_Safety_Correlation {state}", distances_to_failure))
+    plot_paths.append(correlation_plot(q_std, safety_q_std, 'Reward Q-Value Std', 'Safety Q-Value Std', 
+                    'Reward vs Safety Q-Value Standard Deviation', f"Reward_Safety_Correlation {state}", distances_to_failure))
+    plot_paths.append(correlation_plot(mc_returns, safety_mc_returns, 'Reward MC Returns', 'Safety MC Returns', 
+                    'Reward vs Safety MC Returns', f"Reward_Safety_Correlation {state}", distances_to_failure))
+    plot_paths.append(correlation_plot(reward_error, safety_error, 'Reward Estimation Error', 'Safety Estimation Error', 
+                    'Reward vs Safety Estimation Error', f"Reward_Safety_Correlation {state}", distances_to_failure))
+    
+    return metrics, plot_paths  # Return metrics and plot paths for potential manual syncing
 
 def evaluate_value_estimates(global_step, writer, args, env, actor, qf1, qf2, device, safety_qf1=None, safety_qf2=None, safety_mode="both", num_episodes=100, max_steps=1000):
     """

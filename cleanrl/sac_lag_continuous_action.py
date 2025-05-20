@@ -18,7 +18,7 @@ import safety_gymnasium
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
-    """the name of this experiment"""
+    """the name of this experiment"""   
     seed: int = 1
     """seed of the experiment"""
     torch_deterministic: bool = True
@@ -305,6 +305,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             name=run_name,
             monitor_gym=True,
             save_code=True,
+            dir=f"wandb_logs/{run_name}",  # Store logs in a local directory
         )
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
