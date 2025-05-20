@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
-from torch.utils.tensorboard import SummaryWriter
+import wandb
 from utils import *
 import safety_gymnasium
 @dataclass
@@ -295,22 +295,16 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     args = tyro.cli(Args)
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
-        import wandb
-
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
-            sync_tensorboard=True,
             config=vars(args),
             name=run_name,
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
+        # Log hyperparameters
+        wandb.config.update(vars(args))
 
     args.independent_q_reward = args.independent_q_reward == "True"
     args.independent_q_safety = args.independent_q_safety == "True"
@@ -405,11 +399,13 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             for info in infos["final_info"]:
                 episode_failures.append(np.sum(terminations))
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}, episode_failures={np.mean(episode_failures[-10:])}, lambda_value={lambda_value}")
-                writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
-                writer.add_scalar("charts/total_failures", total_failures, global_step)
-                writer.add_scalar("charts/episode_failures", np.sum(terminations), global_step)
-                writer.add_scalar("Lagrange/lambda", lambda_value, global_step)
+                wandb.log({
+                    "charts/episodic_return": info["episode"]["r"],
+                    "charts/episodic_length": info["episode"]["l"],
+                    "charts/total_failures": total_failures,
+                    "charts/episode_failures": np.sum(terminations),
+                    "Lagrange/lambda": lambda_value
+                }, step=global_step)
                 if False:
                     lambda_value = lambda_controller.update(np.mean(episode_failures[-10:])) 
                 break
@@ -424,7 +420,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         if global_step % args.value_evaluation_period == 0:
             # Evaluate reward Q-values
-            evaluate_value_estimates(global_step, writer, args, envs.envs[0], actor, qf1, qf2, device, safety_qf1, safety_qf2, safety_mode="both", num_episodes=100, max_steps=1000)
+            evaluate_value_estimates(global_step, args, envs.envs[0], actor, qf1, qf2, device, safety_qf1, safety_qf2, safety_mode="both", num_episodes=100, max_steps=1000)
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
         if args.use_resets and global_step % args.reset_interval == 0:
@@ -560,21 +556,22 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             # print(f"lambda_value: {lambda_value}")
 
             if global_step % 100 == 0:
-                writer.add_scalar("losses/qf1_values", qf1_a_values.mean().item(), global_step)
-                writer.add_scalar("losses/qf2_values", qf2_a_values.mean().item(), global_step)
-                writer.add_scalar("losses/qf1_loss", qf1_loss.item(), global_step)
-                writer.add_scalar("losses/qf2_loss", qf2_loss.item(), global_step)
-                writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, global_step)
-                writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
-                writer.add_scalar("losses/alpha", alpha, global_step)
-                writer.add_scalar("losses/lambda", lambda_value, global_step)
-                writer.add_scalar("losses/safety_qf1_loss", safety_qf1_loss.item(), global_step)
-                writer.add_scalar("losses/safety_qf2_loss", safety_qf2_loss.item(), global_step)
-                writer.add_scalar("losses/safety_q_loss", safety_q_loss.item() / 2.0, global_step)
-                print("SPS:", int(global_step / (time.time() - start_time)))
-                writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+                wandb.log({
+                    "losses/qf1_values": qf1_a_values.mean().item(),
+                    "losses/qf2_values": qf2_a_values.mean().item(),
+                    "losses/qf1_loss": qf1_loss.item(),
+                    "losses/qf2_loss": qf2_loss.item(),
+                    "losses/qf_loss": qf_loss.item() / 2.0,
+                    "losses/actor_loss": actor_loss.item(),
+                    "losses/alpha": alpha,
+                    "losses/lambda": lambda_value,
+                    "losses/safety_qf1_loss": safety_qf1_loss.item(),
+                    "losses/safety_qf2_loss": safety_qf2_loss.item(),
+                    "losses/safety_q_loss": safety_q_loss.item() / 2.0,
+                    "charts/SPS": int(global_step / (time.time() - start_time))
+                }, step=global_step)
                 if args.autotune:
-                    writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
+                    wandb.log({"losses/alpha_loss": alpha_loss.item()}, step=global_step)
+                print("SPS:", int(global_step / (time.time() - start_time)))
 
     envs.close()
-    writer.close()
