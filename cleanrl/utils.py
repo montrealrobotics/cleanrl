@@ -206,7 +206,21 @@ def analyze_values(q_values, q_mean, q_std, mc_returns, q1_values, q2_values, cd
         correlation_plot(policy_entropies, mc_returns, 'Policy Entropy', 'MC Returns', 
                         'Policy Entropy vs MC Returns', f"{prefix}Entropy Correlation {state}", distances)
 
-def evaluate_value_estimates(global_step, args, env, actor, qf1, qf2, device, safety_qf1=None, safety_qf2=None, safety_mode="both", num_episodes=100, max_steps=1000):
+def evaluate_value_estimates(
+    global_step,
+    args,
+    env,
+    actor,
+    qf1,
+    qf2,
+    device,
+    safety_qf1=None,
+    safety_qf2=None,
+    safety_mode="both",
+    num_episodes=100,
+    max_steps=1000,
+    max_episode_steps=2000,
+):
     """
     Evaluates Q-value overestimation by comparing Q-values to Monte Carlo returns for both reward and safety critics.
     
@@ -220,8 +234,28 @@ def evaluate_value_estimates(global_step, args, env, actor, qf1, qf2, device, sa
         device: The device to run computations on
         safety_mode: One of "reward", "safety", or "both"
         num_episodes: Number of episodes to average over
-        max_steps: Maximum steps per episode
+        max_steps: Number of visited states to evaluate per episode
+        max_episode_steps: Rollout horizon for MC estimation
     """
+    def compute_truncated_returns(rewards, gamma, horizon):
+        rewards_np = np.asarray(rewards, dtype=np.float32)
+        seq_len = len(rewards_np)
+        if seq_len == 0:
+            return []
+        full_returns = np.zeros(seq_len + 1, dtype=np.float32)
+        for t in range(seq_len - 1, -1, -1):
+            full_returns[t] = rewards_np[t] + gamma * full_returns[t + 1]
+        if horizon <= 0:
+            return np.zeros(seq_len, dtype=np.float32).tolist()
+        truncated_returns = np.zeros(seq_len, dtype=np.float32)
+        gamma_h = gamma ** horizon
+        for t in range(seq_len):
+            if t + horizon < seq_len:
+                truncated_returns[t] = full_returns[t] - gamma_h * full_returns[t + horizon]
+            else:
+                truncated_returns[t] = full_returns[t]
+        return truncated_returns.tolist()
+
     # Initialize arrays for reward critic
     q1_values, q2_values, cdq_values, q_values, q_std, q_mean = [], [], [], [], [], []
     mc_returns = []
@@ -265,7 +299,7 @@ def evaluate_value_estimates(global_step, args, env, actor, qf1, qf2, device, sa
         episode_safety = []  # For tracking safety (termination) events
         
         # Run episode and collect rewards
-        while not done and step < max_steps:
+        while not done and step < max_episode_steps:
             with torch.no_grad():
                 state = torch.FloatTensor(obs).to(device)
                 action, log_prob, entropy = actor.get_action(state.unsqueeze(0))  # Get entropy from policy
@@ -314,23 +348,24 @@ def evaluate_value_estimates(global_step, args, env, actor, qf1, qf2, device, sa
                     
                     safety_q_values.append(safety_q_value)
             
-            # Record all step values for reward critic
-            q1_array[episode, step] = q1.item()
-            q2_array[episode, step] = q2.item()
-            cdq_array[episode, step] = torch.min(q1, q2).item()
-            q_array[episode, step] = q_value if step == 0 else 0  # Only for first step
-            q_std_array[episode, step] = torch.abs(q1 - q2).item() / 2
-            q_mean_array[episode, step] = ((q1 + q2)/2).item()
-            policy_entropy_array[episode, step] = log_prob.mean().item()  # Take mean of entropy if it's a multi-element tensor
-            
-            # Record all step values for safety critic if needed
-            if safety_qf1 is not None and safety_qf2 is not None and (safety_mode == "safety" or safety_mode == "both"):
-                safety_q1_array[episode, step] = safety_q1.item()
-                safety_q2_array[episode, step] = safety_q2.item()
-                safety_cdq_array[episode, step] = torch.max(safety_q1, safety_q2).item()  # For safety, take max
-                safety_q_array[episode, step] = safety_q_value if step == 0 else 0  # Only for first step
-                safety_q_std_array[episode, step] = torch.abs(safety_q1 - safety_q2).item() / 2
-                safety_q_mean_array[episode, step] = ((safety_q1 + safety_q2)/2).item()
+            if step < max_steps:
+                # Record all step values for reward critic
+                q1_array[episode, step] = q1.item()
+                q2_array[episode, step] = q2.item()
+                cdq_array[episode, step] = torch.min(q1, q2).item()
+                q_array[episode, step] = q_value if step == 0 else 0  # Only for first step
+                q_std_array[episode, step] = torch.abs(q1 - q2).item() / 2
+                q_mean_array[episode, step] = ((q1 + q2)/2).item()
+                policy_entropy_array[episode, step] = log_prob.mean().item()  # Take mean of entropy if it's a multi-element tensor
+                
+                # Record all step values for safety critic if needed
+                if safety_qf1 is not None and safety_qf2 is not None and (safety_mode == "safety" or safety_mode == "both"):
+                    safety_q1_array[episode, step] = safety_q1.item()
+                    safety_q2_array[episode, step] = safety_q2.item()
+                    safety_cdq_array[episode, step] = torch.max(safety_q1, safety_q2).item()  # For safety, take max
+                    safety_q_array[episode, step] = safety_q_value if step == 0 else 0  # Only for first step
+                    safety_q_std_array[episode, step] = torch.abs(safety_q1 - safety_q2).item() / 2
+                    safety_q_mean_array[episode, step] = ((safety_q1 + safety_q2)/2).item()
 
             # Execute action in environment
             action = action.squeeze().detach().cpu().numpy()
@@ -345,35 +380,28 @@ def evaluate_value_estimates(global_step, args, env, actor, qf1, qf2, device, sa
 
         # Calculate Monte Carlo returns for reward
         # Calculate Monte Carlo returns and distances
-        mc_return = []
-        return_ = 0
-        distance_to_term = []  # Distance to termination state
-        distance_from_start = []  # Distance from start state
-        
-        # Calculate returns and distances going backwards
-        for i, r in enumerate(reversed(episode_rewards)):
-            return_ = r + args.gamma * return_
-            mc_return.insert(0, return_)
-            distance_to_term.insert(0, i)  # Steps until end
-        
-        # Calculate distance from start going forwards
-        for i in range(len(episode_rewards)):
-            distance_from_start.append(i)  # Steps since start
-            
-        mc_returns.append(mc_return[0])  # First step return
-        mc_returns_array[episode, :len(mc_return)] = np.array(mc_return)
-        distances_to_term_array[episode, :len(distance_to_term)] = np.array(distance_to_term) 
-        distances_from_start_array[episode, :len(distance_from_start)] = np.array(distance_from_start)
+        mc_return = compute_truncated_returns(episode_rewards, args.gamma, max_steps)
+        distance_to_term = [
+            len(episode_rewards) - 1 - i for i in range(len(episode_rewards))
+        ]
+        distance_from_start = list(range(len(episode_rewards)))
+
+        if mc_return:
+            mc_returns.append(mc_return[0])  # First step return
+        mc_len = min(len(mc_return), max_steps)
+        if mc_len > 0:
+            mc_returns_array[episode, :mc_len] = np.array(mc_return[:mc_len])
+            distances_to_term_array[episode, :mc_len] = np.array(distance_to_term[:mc_len]) 
+            distances_from_start_array[episode, :mc_len] = np.array(distance_from_start[:mc_len])
         
         # Calculate Monte Carlo returns for safety if needed
         if safety_qf1 is not None and safety_qf2 is not None and (safety_mode == "safety" or safety_mode == "both"):
-            safety_mc_return = []
-            safety_return = 0
-            for r in reversed(episode_safety):
-                safety_return = r + args.gamma * safety_return
-                safety_mc_return.insert(0, safety_return)
-            safety_mc_returns.append(safety_mc_return[0])  # First step return
-            safety_mc_returns_array[episode, :len(safety_mc_return)] = np.array(safety_mc_return)
+            safety_mc_return = compute_truncated_returns(episode_safety, args.gamma, max_steps)
+            if safety_mc_return:
+                safety_mc_returns.append(safety_mc_return[0])  # First step return
+            safety_len = min(len(safety_mc_return), max_steps)
+            if safety_len > 0:
+                safety_mc_returns_array[episode, :safety_len] = np.array(safety_mc_return[:safety_len])
 
     # Save results
     import pickle

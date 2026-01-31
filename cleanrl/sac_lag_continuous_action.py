@@ -204,7 +204,6 @@ class PIDLambdaController:
         self.lambda_value = lambda_init
         
     def update(self, current_cost):
-        # print(f"current_cost: {current_cost}")
         # Calculate error
         error = current_cost - self.setpoint
         
@@ -215,10 +214,6 @@ class PIDLambdaController:
         derivative = error - self.prev_error
         self.prev_error = error
         
-        # print(f"error: {error}")
-        # print(f"derivative: {derivative}")
-        # print(f"integral: {self.integral}")
-        # PID formula
         lambda_value = (self.kp * error + 
                        self.ki * self.integral + 
                        self.kd * derivative)
@@ -324,6 +319,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     args.use_resets = args.use_resets == "True"
     # env setup
     envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    eval_env = gym.make(args.env_id, max_episode_steps=2000)
+    eval_env.action_space.seed(args.seed)
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     max_action = float(envs.single_action_space.high[0])
@@ -420,7 +417,21 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         if global_step % args.value_evaluation_period == 0:
             # Evaluate reward Q-values
-            evaluate_value_estimates(global_step, args, envs.envs[0], actor, qf1, qf2, device, safety_qf1, safety_qf2, safety_mode="both", num_episodes=100, max_steps=1000)
+            evaluate_value_estimates(
+                global_step,
+                args,
+                eval_env,   
+                actor,
+                qf1,
+                qf2,
+                device,
+                safety_qf1,
+                safety_qf2,
+                safety_mode="both",
+                num_episodes=100,
+                max_steps=1000,
+                max_episode_steps=2000,
+            )
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
         if args.use_resets and global_step % args.reset_interval == 0:
